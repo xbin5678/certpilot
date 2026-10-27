@@ -111,6 +111,15 @@ case "$(uname -m)" in
 esac
 
 # ---------------- 卸载 ----------------
+# 生成"重新执行本脚本"的命令，兼容管道执行（此时 $0 是 bash）
+self_cmd() {
+  if [ -n "$SCRIPT_DIR" ]; then
+    printf 'sudo %s/install.sh' "$SCRIPT_DIR"
+  else
+    printf 'curl -fsSL https://github.com/%s/releases/latest/download/install.sh | sudo bash -s --' "$REPO"
+  fi
+}
+
 stop_service() {
   systemctl stop "$SERVICE" >/dev/null 2>&1 || true
 }
@@ -134,7 +143,7 @@ do_uninstall() {
     ok "已删除数据目录 $DATA_DIR"
   else
     ok "数据目录已保留：$DATA_DIR"
-    printf '%s\n' "${DIM}  如需彻底删除：sudo $0 --purge${NC}"
+    printf '%s\n' "${DIM}  如需彻底删除：$(self_cmd) --purge${NC}"
   fi
 }
 
@@ -417,11 +426,7 @@ else
 fi
 printf '%s\n' "  查看日志: journalctl -u $SERVICE -f"
 # 管道执行时 $0 是 bash，直接用它拼命令会得到无效的 "sudo bash --uninstall"
-if [ -n "$SCRIPT_DIR" ]; then
-  SELF="sudo $SCRIPT_DIR/install.sh"
-else
-  SELF="curl -fsSL https://github.com/$REPO/releases/latest/download/install.sh | sudo bash -s --"
-fi
+SELF="$(self_cmd)"
 printf '%s\n' "  卸载    : $SELF --uninstall   ${DIM}(保留数据)${NC}"
 printf '%s\n' "            $SELF --purge       ${DIM}(连数据一起删)${NC}"
 NEED_SETUP=0
