@@ -26,8 +26,8 @@ import (
 	"certpilot/internal/web"
 )
 
-// Version 版本号
-const Version = "1.1.0"
+// Version 版本号，发布时由 CI 通过 -X main.Version 注入
+var Version = "1.1.2-dev"
 
 func main() {
 	log.SetFlags(log.Ltime)

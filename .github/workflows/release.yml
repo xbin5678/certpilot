@@ -24,12 +24,16 @@ jobs:
         run: go test ./...
 
       - name: Build linux binaries
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -e
+          VERSION="${REF_NAME#v}"
+          echo "version: $VERSION"
           for arch in amd64 arm64; do
             echo "building linux/$arch"
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
-              go build -trimpath -ldflags "-s -w" -o certpilot .
+              go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" -o certpilot .
             tar czf "certpilot-linux-$arch.tar.gz" certpilot
             rm -f certpilot
           done

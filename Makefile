@@ -1,6 +1,6 @@
 BINARY  := certpilot
-VERSION := $(shell grep -o 'Version = "[^"]*"' main.go | head -1 | cut -d'"' -f2)
-LDFLAGS := -s -w
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo dev)
+LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 .PHONY: all build fmt vet test clean release bundle linux-amd64 linux-arm64
 
