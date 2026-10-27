@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # ---------------- 可覆盖的默认值 ----------------
-REPO="${CERTPILOT_REPO:-__REPO__}"          # 例：yourname/certpilot
+REPO="${CERTPILOT_REPO:-__REPO_SLUG__}"      # CI 会替换成 owner/repo
 VERSION="${CERTPILOT_VERSION:-latest}"
 PORT="${CERTPILOT_PORT:-9443}"
 DATA_DIR="${CERTPILOT_DATA:-/etc/certpilot}"
@@ -146,7 +146,11 @@ fetch_binary() {
   done
 
   # 2) 从 GitHub Release 下载
-  [ "$REPO" != "__REPO__" ] || die "尚未配置仓库地址。请用 --repo owner/repo 指定，或把二进制放在脚本同目录离线安装"
+  # 用"是否包含斜杠"来判断，避免哨兵字符串被 CI 替换后把判断逻辑改坏
+  case "$REPO" in
+    */*) : ;;
+    *) die "尚未配置仓库地址。请用 --repo owner/repo 指定，或把二进制放在脚本同目录离线安装" ;;
+  esac
 
   local base url
   if [ "$VERSION" = "latest" ]; then
