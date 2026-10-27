@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"certpilot/internal/acme"
@@ -35,6 +36,8 @@ type Server struct {
 	sched   *scheduler.Scheduler
 	version string
 
+	inflight   int64         // 当前处理中的请求数
+	lastActive atomic.Int64  // 最后一次活动时间（UnixNano）
 	settingsMu chan struct{} // 串行化设置写入
 	getSet     func() store.Settings
 	setSet     func(store.Settings) error
@@ -42,11 +45,13 @@ type Server struct {
 
 func New(st *store.Store, mgr *acme.Manager, det *compat.Detector, sched *scheduler.Scheduler, version string,
 	getSet func() store.Settings, setSet func(store.Settings) error) *Server {
-	return &Server{
+	s := &Server{
 		st: st, mgr: mgr, det: det, sched: sched, version: version,
 		getSet: getSet, setSet: setSet,
 		settingsMu: make(chan struct{}, 1),
 	}
+	s.lastActive.Store(time.Now().UnixNano())
+	return s
 }
 
 // Handler 构建路由
@@ -92,7 +97,32 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/check", s.auth(s.handleCheckNow))
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 
-	return s.logMiddleware(s.csrfMiddleware(mux))
+	return s.trackActivity(s.logMiddleware(s.csrfMiddleware(mux)))
+}
+
+// trackActivity 记录请求进出，用于空闲退出判断
+func (s *Server) trackActivity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&s.inflight, 1)
+		s.lastActive.Store(time.Now().UnixNano())
+		defer func() {
+			s.lastActive.Store(time.Now().UnixNano())
+			atomic.AddInt64(&s.inflight, -1)
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// IdleFor 返回已空闲时长；有请求在处理时返回 0
+func (s *Server) IdleFor() time.Duration {
+	if atomic.LoadInt64(&s.inflight) > 0 {
+		return 0
+	}
+	last := s.lastActive.Load()
+	if last == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, last))
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {

@@ -136,6 +136,21 @@ func (jm *JobManager) Running(certID string) *Job {
 	return nil
 }
 
+// AnyRunning 返回正在执行的任务数量
+func (jm *JobManager) AnyRunning() int {
+	jm.mu.RLock()
+	defer jm.mu.RUnlock()
+	n := 0
+	for _, j := range jm.jobs {
+		j.mu.Lock()
+		if j.Status == JobRunning {
+			n++
+		}
+		j.mu.Unlock()
+	}
+	return n
+}
+
 // List 最近的任务
 func (jm *JobManager) List(limit int) []JobView {
 	jm.mu.RLock()

@@ -54,21 +54,11 @@ func NewDetector(modeFn func() string) *Detector {
 	return d
 }
 
-// Start 后台每 45 秒刷新一次
+// Start 只做一次初始探测。
+// 之前是每 45 秒轮询一次，待机时会白白唤醒进程；
+// 现在改为按需刷新（Get 发现数据超过 20 秒才重新探测），空闲时零开销。
 func (d *Detector) Start(ctx context.Context) {
-	go func() {
-		t := time.NewTicker(45 * time.Second)
-		defer t.Stop()
-		d.Refresh()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				d.Refresh()
-			}
-		}
-	}()
+	d.Refresh()
 }
 
 // Get 返回当前状态，超过 20 秒则重新探测

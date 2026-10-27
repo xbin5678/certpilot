@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,7 +27,7 @@ import (
 )
 
 // Version 版本号
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -40,6 +42,8 @@ func main() {
 		cmdDoctor(os.Args[2:])
 	case "issue":
 		cmdIssue(os.Args[2:])
+	case "renew":
+		cmdRenew(os.Args[2:])
 	case "list":
 		cmdList(os.Args[2:])
 	case "version", "-v", "--version":
@@ -60,6 +64,7 @@ func usage() {
   certpilot serve   [-listen :8443] [-data DIR]     启动 Web 管理后台
   certpilot doctor  [-data DIR]                     体检：端口占用 / 3x-ui 兼容性
   certpilot issue   -domain a.com,b.com [选项]      命令行签发一张证书
+  certpilot renew   [-data DIR] [-dry-run]          检查并续期所有到期证书后退出
   certpilot list    [-data DIR]                     列出所有证书
   certpilot version                                 显示版本
 
@@ -128,6 +133,8 @@ func cmdServe(args []string) {
 	listen := fs.String("listen", "", "监听地址，例如 :8443 或 127.0.0.1:8443")
 	tlsCert := fs.String("tls-cert", "", "面板 HTTPS 证书路径，多张用逗号分隔")
 	tlsKey := fs.String("tls-key", "", "面板 HTTPS 私钥路径，顺序与证书一一对应")
+	idleTimeout := fs.Duration("idle-timeout", 0, "空闲多久后退出（0=常驻）。配合 systemd socket 实现按需启动")
+	withScheduler := fs.Bool("scheduler", true, "进程内是否运行续期调度器（按需模式建议关掉，改用 renew 定时器）")
 	_ = fs.Parse(args)
 
 	if err := os.MkdirAll(*dataDir, 0o750); err != nil {
@@ -160,12 +167,13 @@ func cmdServe(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	det.Start(ctx)
-	sched.Start(ctx)
+	if *withScheduler {
+		sched.Start(ctx)
+	}
 
 	srv := web.New(st, mgr, det, sched, Version, ss.Get, ss.Set)
 
 	httpSrv := &http.Server{
-		Addr:              addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 15 * time.Second,
 		ReadTimeout:       60 * time.Second,
@@ -178,35 +186,103 @@ func cmdServe(args []string) {
 		log.Fatalf("证书参数错误: %v", err)
 	}
 	useTLS := len(pairs) > 0
-	banner(addr, *dataDir, ss.Get(), useTLS, len(pairs))
 
-	go func() {
-		var err error
-		if useTLS {
-			// 证书文件变化时自动重载，续期后不需要重启面板
-			httpSrv.TLSConfig = &tls.Config{
-				MinVersion:     tls.VersionTLS12,
-				GetCertificate: web.MultiCertReloader(pairs),
+	// 优先使用 systemd socket 激活传入的监听套接字（此时进程无需自己 bind 端口）
+	ln := systemdListener()
+	activated := ln != nil
+	if ln == nil {
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			if isAddrInUse(err) {
+				log.Printf("端口 %s 已被占用。如果使用按需模式，请执行：systemctl restart certpilot.socket", addr)
+				return
 			}
-			err = httpSrv.ListenAndServeTLS("", "")
-		} else {
-			err = httpSrv.ListenAndServe()
+			log.Fatalf("监听失败: %v", err)
 		}
-		if err != nil && err != http.ErrServerClosed {
-			log.Fatalf("服务异常退出: %v", err)
+	}
+
+	if useTLS {
+		httpSrv.TLSConfig = &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: web.MultiCertReloader(pairs),
 		}
-	}()
+		ln = tls.NewListener(ln, httpSrv.TLSConfig)
+	}
+
+	banner(addr, *dataDir, ss.Get(), useTLS, len(pairs), activated, *idleTimeout)
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpSrv.Serve(ln) }()
+
+	idleDone := make(chan struct{})
+	if *idleTimeout > 0 {
+		go watchIdle(srv, mgr, *idleTimeout, idleDone)
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-	log.Println("正在关闭...")
+
+	select {
+	case <-stop:
+		log.Println("收到退出信号")
+	case <-idleDone:
+		log.Printf("已空闲 %s，进程退出，下次访问时由 systemd 自动拉起", *idleTimeout)
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("服务异常退出: %v", err)
+		}
+		return
+	}
+
 	shutdownCtx, c2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer c2()
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
 
-func banner(addr, dataDir string, s store.Settings, useTLS bool, certCount int) {
+// systemdListener 读取 systemd 通过 LISTEN_FDS 传入的监听套接字
+func systemdListener() net.Listener {
+	if os.Getenv("LISTEN_PID") != strconv.Itoa(os.Getpid()) {
+		return nil
+	}
+	n, err := strconv.Atoi(os.Getenv("LISTEN_FDS"))
+	if err != nil || n < 1 {
+		return nil
+	}
+	f := os.NewFile(uintptr(3), "systemd-listen")
+	if f == nil {
+		return nil
+	}
+	ln, err := net.FileListener(f)
+	_ = f.Close()
+	if err != nil {
+		return nil
+	}
+	return ln
+}
+
+func isAddrInUse(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "address already in use") ||
+		strings.Contains(msg, "only one usage") ||
+		strings.Contains(msg, "address in use")
+}
+
+// watchIdle 空闲超时后通知主流程退出
+func watchIdle(srv *web.Server, mgr *acme.Manager, timeout time.Duration, done chan struct{}) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if mgr.Jobs().AnyRunning() > 0 {
+			continue
+		}
+		if srv.IdleFor() >= timeout {
+			close(done)
+			return
+		}
+	}
+}
+
+func banner(addr, dataDir string, s store.Settings, useTLS bool, certCount int, activated bool, idle time.Duration) {
 	host := addr
 	if strings.HasPrefix(host, ":") {
 		host = "127.0.0.1" + host
@@ -221,6 +297,14 @@ func banner(addr, dataDir string, s store.Settings, useTLS bool, certCount int) 
 	fmt.Printf("  访问地址 : %s://%s\n", scheme, host)
 	if useTLS {
 		fmt.Printf("  TLS 证书 : 已加载 %d 张（按 SNI 自动选择）\n", certCount)
+	}
+	switch {
+	case activated && idle > 0:
+		fmt.Printf("  运行模式 : 按需启动（空闲 %s 后退出）\n", idle)
+	case activated:
+		fmt.Println("  运行模式 : socket 激活（常驻）")
+	case idle > 0:
+		fmt.Printf("  运行模式 : 常驻（空闲 %s 后退出）\n", idle)
 	}
 	fmt.Printf("  数据目录 : %s\n", dataDir)
 	if s.AdminPasswordHash == "" {
@@ -439,6 +523,88 @@ func normalizeDomainList(s string) ([]string, error) {
 		return nil, fmt.Errorf("没有有效域名")
 	}
 	return out, nil
+}
+
+// ---------- renew ----------
+
+// cmdRenew 检查所有到期证书并续期，处理完退出。
+// 供 systemd timer 调用，进程活几秒就退出，不占待机内存。
+func cmdRenew(args []string) {
+	fs := flag.NewFlagSet("renew", flag.ExitOnError)
+	dataDir := fs.String("data", defaultDataDir(), "数据目录")
+	dryRun := fs.Bool("dry-run", false, "只列出待续期的证书，不执行")
+	_ = fs.Parse(args)
+
+	if err := os.MkdirAll(*dataDir, 0o750); err != nil {
+		log.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(*dataDir, "certpilot.db"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer st.Close()
+
+	ss, err := newSettingsStore(st)
+	if err != nil {
+		log.Fatal(err)
+	}
+	det := compat.NewDetector(func() string { return ss.Get().Compat3XUI })
+	nt := notify.New(ss.Get)
+	mgr := acme.NewManager(st, *dataDir, det, nt, ss.Get)
+
+	certs, err := st.ListCerts()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	now := time.Now()
+	var due []*store.Cert
+	for _, c := range certs {
+		c.RefreshStatus(now)
+		_ = st.PutCert(c)
+		if !c.AutoRenew || c.Status == store.StatusRevoked {
+			continue
+		}
+		// 从未签发过的不自动申请，交给用户手动触发
+		if c.LastIssuedAt == "" || c.NotAfter == "" {
+			continue
+		}
+		if !c.NeedsRenew(now) {
+			continue
+		}
+		due = append(due, c)
+	}
+
+	if len(due) == 0 {
+		fmt.Println("没有需要续期的证书")
+		return
+	}
+
+	failed := 0
+	for _, c := range due {
+		name := strings.Join(c.Domains, ",")
+		if c.Challenge == store.ChallengeDNSManual {
+			fmt.Printf("跳过 %s：手动 DNS 模式需要人工添加 TXT 记录，请在面板里操作\n", name)
+			continue
+		}
+		if *dryRun {
+			fmt.Printf("待续期: %s（剩余 %d 天）\n", name, c.DaysLeft())
+			continue
+		}
+		job := mgr.Jobs().Create(c.ID, "renew")
+		if err := mgr.Issue(context.Background(), c, "renew", job); err != nil {
+			job.Finish(acme.JobError, err.Error())
+			failed++
+			fmt.Printf("✘ %s 续期失败: %v\n", name, err)
+		} else {
+			job.Finish(acme.JobSuccess, "续期成功")
+			fmt.Printf("✔ %s 续期成功，新到期时间 %s\n", name, c.NotAfter)
+		}
+	}
+
+	if failed > 0 {
+		os.Exit(1)
+	}
 }
 
 // ---------- list ----------

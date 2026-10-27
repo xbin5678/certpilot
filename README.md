@@ -108,6 +108,41 @@ sudo ./install.sh --password 'YourPass123'
 
 脚本会优先使用同目录下的 `certpilot` 二进制，不需要联网。
 
+### 低配 VPS：按需启动（默认）
+
+默认安装为 **systemd socket 激活**模式，待机时**没有任何常驻进程**：
+
+| 状态 | 内存占用 | 说明 |
+|---|---|---|
+| 待机（无人访问） | **0 MB** | 进程已退出，只有 systemd 持有监听端口 |
+| 打开网页时 | ~18-22 MB | 首次连接自动拉起，实测 168ms 响应 |
+| 空闲 10 分钟后 | 0 MB | 自动退出，下次访问再拉起 |
+| 证书续期 | ~20 MB / 4 秒 | systemd 定时器每天跑 4 次，跑完立即退出 |
+
+续期不再依赖常驻进程：`certpilot-renew.timer` 每 6 小时调用一次 `certpilot renew`，检查到期证书、续期、退出。
+
+想改回常驻模式：
+
+```bash
+sudo ./install.sh --mode always
+```
+
+调整空闲退出时间：
+
+```bash
+sudo ./install.sh --idle 30m
+```
+
+按需模式下服务管理用 socket 而不是 service：
+
+```bash
+systemctl status certpilot.socket     # 看监听状态
+systemctl restart certpilot.socket    # 重启（会连带重启服务）
+systemctl list-timers certpilot-renew.timer
+```
+
+> 注意：`systemctl restart certpilot` 在按需模式下会因为没有监听套接字而直接退出，请操作 `certpilot.socket`。
+
 ### 安装脚本做了什么
 
 1. 校验 root 权限与 systemd，识别 `amd64` / `arm64`
@@ -125,6 +160,7 @@ sudo ./install.sh --password 'YourPass123'
 | 操作 | 命令 |
 |---|---|
 | 升级到最新版 | `sudo ./install.sh` |
+| 切换按需/常驻 | `sudo ./install.sh --mode ondemand` / `--mode always` |
 | 改端口重装 | `sudo ./install.sh --port 8080` |
 | 卸载（保留证书与配置） | `sudo ./install.sh --uninstall` |
 | 彻底卸载（连数据一起删） | `sudo ./install.sh --purge` |
