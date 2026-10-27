@@ -294,8 +294,14 @@ printf '%s\n' "  访问地址: ${BOLD}$SCHEME://$IP:$PORT${NC}"
 printf '%s\n' "  数据目录: $DATA_DIR"
 printf '%s\n' "  服务管理: systemctl {status|restart|stop} $SERVICE"
 printf '%s\n' "  查看日志: journalctl -u $SERVICE -f"
-printf '%s\n' "  卸载    : sudo $0 --uninstall   ${DIM}(保留数据)${NC}"
-printf '%s\n' "            sudo $0 --purge       ${DIM}(连数据一起删)${NC}"
+# 管道执行时 $0 是 bash，直接用它拼命令会得到无效的 "sudo bash --uninstall"
+if [ -n "$SCRIPT_DIR" ]; then
+  SELF="sudo $SCRIPT_DIR/install.sh"
+else
+  SELF="curl -fsSL https://github.com/$REPO/releases/latest/download/install.sh | sudo bash -s --"
+fi
+printf '%s\n' "  卸载    : $SELF --uninstall   ${DIM}(保留数据)${NC}"
+printf '%s\n' "            $SELF --purge       ${DIM}(连数据一起删)${NC}"
 NEED_SETUP=0
 if [ "$NO_START" != "1" ] && command -v curl >/dev/null 2>&1; then
   SESS=$(curl -s $CURL_EXTRA "$SCHEME://127.0.0.1:$PORT/api/session" 2>/dev/null || true)
