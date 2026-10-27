@@ -1,0 +1,24 @@
+[Unit]
+Description=CertPilot certificate manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 证书管理需要绑定 80/443、写入 /root/cert、执行 x-ui restart，
+# 因此默认以 root 运行。若只用 DNS-01 且不写 /root/cert，
+# 可以改成 User=certpilot 并去掉 AmbientCapabilities。
+User=root
+ExecStart=/usr/local/bin/certpilot serve -data /etc/certpilot -listen :8443
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+PrivateTmp=true
+
+# 仅使用 DNS-01 时可打开下面的加固（会禁止提权，x-ui restart 将不可用）
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ReadWritePaths=/etc/certpilot
+
+[Install]
+WantedBy=multi-user.target

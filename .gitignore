@@ -1,0 +1,12 @@
+certpilot
+certpilot.exe
+dist/
+data/
+testdata/
+ck.txt
+cookies.txt
+server.log
+*.db
+*.db-wal
+*.db-shm
+docs/screenshots/vps-*.png

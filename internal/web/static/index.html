@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CertPilot · 证书管理</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="boot" class="boot">正在加载…</div>
+
+<div id="app" hidden>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">CP</div>
+      <div>
+        <div class="brand-name">CertPilot</div>
+        <div class="brand-sub">证书管理台</div>
+      </div>
+    </div>
+    <nav id="nav">
+      <button class="nav-item active" data-view="overview"><span class="ico">◈</span>概览</button>
+      <button class="nav-item" data-view="certs"><span class="ico">▤</span>证书</button>
+      <button class="nav-item" data-view="paths"><span class="ico">⌸</span>证书路径</button>
+      <button class="nav-item" data-view="compat"><span class="ico">⚯</span>环境与兼容</button>
+      <button class="nav-item" data-view="logs"><span class="ico">≡</span>日志</button>
+      <button class="nav-item" data-view="settings"><span class="ico">⚙</span>设置</button>
+    </nav>
+    <div class="sidebar-foot">
+      <span id="ver">v1.0.0</span>
+      <button class="link" id="logout">退出</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="page-title">概览</h1>
+        <p id="page-sub" class="sub">证书状态一览</p>
+      </div>
+      <div class="topbar-actions" id="topbar-actions"></div>
+    </header>
+    <section id="content" class="content"></section>
+  </main>
+</div>
+
+<div id="login" class="login-wrap" hidden>
+  <form class="login-card" id="login-form">
+    <div class="login-brand">
+      <div class="brand-mark big">CP</div>
+      <h2 id="login-title">登录 CertPilot</h2>
+      <p id="login-sub" class="sub">请输入管理密码</p>
+    </div>
+    <label class="field">
+      <span>管理密码</span>
+      <input type="password" id="login-password" autocomplete="current-password" placeholder="至少 8 位" required>
+    </label>
+    <label class="field" id="email-field" hidden>
+      <span>ACME 联系邮箱</span>
+      <input type="email" id="login-email" placeholder="you@example.com">
+      <small>用于向 Let's Encrypt 等 CA 注册账号，可稍后在设置里修改</small>
+    </label>
+    <div class="err" id="login-err"></div>
+    <button class="btn primary block" type="submit" id="login-btn">登录</button>
+  </form>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root" class="toast-root"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
