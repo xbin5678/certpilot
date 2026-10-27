@@ -271,8 +271,11 @@ EOF
   cat > "$UNIT_PATH" <<EOF
 [Unit]
 Description=CertPilot certificate manager (on-demand)
-After=network-online.target
+After=network-online.target certpilot.socket
 Wants=network-online.target
+# socket 停止时同步停掉服务，否则进程会一直占着继承来的监听套接字，
+# 导致 socket 无法重新绑定端口
+BindsTo=certpilot.socket
 
 [Service]
 Type=simple

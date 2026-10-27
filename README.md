@@ -133,15 +133,18 @@ sudo ./install.sh --mode always
 sudo ./install.sh --idle 30m
 ```
 
-按需模式下服务管理用 socket 而不是 service：
+按需模式下，端口由 `certpilot.socket` 持有，管理入口是 socket 而不是 service：
 
 ```bash
-systemctl status certpilot.socket     # 看监听状态
-systemctl restart certpilot.socket    # 重启（会连带重启服务）
+systemctl status certpilot.socket      # 看监听状态（即使没有进程也在监听）
+systemctl restart certpilot.socket     # 重启（连带重启服务）
+systemctl stop certpilot.socket        # 完全停止（连带停进程、释放端口）
 systemctl list-timers certpilot-renew.timer
 ```
 
-> 注意：`systemctl restart certpilot` 在按需模式下会因为没有监听套接字而直接退出，请操作 `certpilot.socket`。
+服务单元带 `BindsTo=certpilot.socket`，所以停 socket 会同步停进程，不会出现"进程还在、socket 却起不来"的僵局。
+
+> 注意：`systemctl restart certpilot` 在按需模式下没有监听套接字可继承，会直接退出，请操作 `certpilot.socket`。
 
 ### 安装脚本做了什么
 
