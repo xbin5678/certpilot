@@ -99,13 +99,13 @@ CertPilot 把证书管理从面板里独立出来：
 ### 方式一：一条命令（在线）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/xbin5678/certpilot/main/install.sh | sudo bash
 ```
 
 带参数安装（端口、管理员密码、ACME 邮箱）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/xbin5678/certpilot/main/install.sh \
   | sudo bash -s -- --port 9443 --password 'YourPass123' --email you@example.com
 ```
 
@@ -188,7 +188,8 @@ systemctl list-timers certpilot-renew.timer
 
 ### 发布自己的版本
 
-把 `install.sh` 里的 `__REPO__` 换成 `你的用户名/certpilot`（或用 `--repo owner/repo` 指定），然后打 tag：
+本仓库的 `install.sh` 里写的是占位符 `__REPO_SLUG__`，CI 在打包时会把它替换成实际仓库地址；
+如果你想 fork 后自己发版，也可以直接用 `--repo 你的用户名/certpilot` 指定。然后打 tag：
 
 ```bash
 git tag v1.0.0 && git push --tags
