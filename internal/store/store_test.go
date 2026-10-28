@@ -149,3 +149,56 @@ func TestEvents(t *testing.T) {
 		t.Fatalf("日志内容不对: %+v", ev[0])
 	}
 }
+
+// 进程被 kill 后，证书会永久卡在 issuing —— RefreshStatus 遇到 issuing
+// 会直接返回，界面再也不刷新。启动时必须复位。
+func TestResetIssuing(t *testing.T) {
+	st := newTestStore(t)
+
+	now := time.Now()
+	mk := func(id, status string) *Cert {
+		return &Cert{
+			ID: id, Name: id, Domains: []string{id + ".com"},
+			CA: "letsencrypt", KeyType: "ec256", Challenge: ChallengeDNS,
+			Status: status, NotAfter: now.AddDate(0, 0, 60).Format(time.RFC3339),
+			RenewBeforeDays: 30,
+		}
+	}
+	for _, c := range []*Cert{
+		mk("a1", StatusIssuing),
+		mk("b2", StatusIssuing),
+		mk("c3", StatusValid),
+		mk("d4", StatusError),
+	} {
+		if err := st.PutCert(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := st.ResetIssuing()
+	if err != nil {
+		t.Fatalf("复位失败: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("应复位 2 张，实际 %d", n)
+	}
+
+	certs, err := st.ListCerts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range certs {
+		if c.Status == StatusIssuing {
+			t.Fatalf("证书 %s 仍停留在 issuing", c.ID)
+		}
+	}
+	// 其它状态不应被改动
+	if c, _ := st.GetCert("d4"); c == nil || c.Status != StatusError {
+		t.Fatalf("error 状态不应被复位改动: %+v", c)
+	}
+
+	// 幂等：再跑一次没有可复位的
+	if n2, _ := st.ResetIssuing(); n2 != 0 {
+		t.Fatalf("第二次复位应为 0，实际 %d", n2)
+	}
+}

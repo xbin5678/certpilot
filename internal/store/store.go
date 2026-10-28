@@ -227,6 +227,23 @@ func boolStr(b bool) string {
 	return "0"
 }
 
+// ResetIssuing 进程启动时清理上次遗留的「进行中」状态。
+//
+// 签发任务只存在于内存里，进程被杀或崩溃后任务不可能还在跑，但数据库里
+// status 会永远停在 issuing —— 而 RefreshStatus 遇到 issuing 会直接返回，
+// 结果就是界面上那张证书永远显示「进行中」，再也不刷新。
+// 这里把它退回 valid，交给 RefreshStatus 按到期时间重新算成
+// valid / expiring / expired / pending。
+func (s *Store) ResetIssuing() (int64, error) {
+	res, err := s.db.Exec(`UPDATE certs SET status = ? WHERE status = ?`,
+		StatusValid, StatusIssuing)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ---------- certs ----------
 
 const certCols = `id, name, domains, ca, key_type, challenge, webroot, challenge_port,

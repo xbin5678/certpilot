@@ -217,22 +217,12 @@ func (m *Manager) Issue(ctx context.Context, c *store.Cert, action string, job *
 	_ = deploy.WriteAtomic(filepath.Join(dir, "meta.json"), meta, 0o644)
 	job.AddLog("证书已保存到 %s", dir)
 
-	// 6. 外部部署
-	if c.DeployCertPath != "" || c.DeployKeyPath != "" || c.DeployCmd != "" {
-		job.AddLog("执行部署...")
-		r, err := deploy.Apply(c, files)
-		if err != nil {
-			return m.fail(c, job, err)
-		}
-		for _, p := range r.Paths {
-			job.AddLog("已写入 %s", p)
-		}
-		if r.Output != "" {
-			job.AddLog("重载输出: %s", truncate(r.Output, 300))
-		}
-	}
-
-	// 7. 更新状态
+	// 6. 先记录证书有效期。
+	//
+	// 顺序很关键：如果先部署、部署失败就 return，数据库里的 NotAfter 还是旧值，
+	// scheduler 下一轮仍会判定「需要续期」，于是再签一张 —— 反复几次就会撞上
+	// CA 的重复证书限流（Let's Encrypt 每周 5 张），而用户只看到"部署失败"，
+	// 完全不知道背后多签了四张。所以先落库有效期，再部署。
 	c.NotBefore = leaf.NotBefore.Format(time.RFC3339)
 	c.NotAfter = leaf.NotAfter.Format(time.RFC3339)
 	c.Serial = leaf.SerialNumber.Text(16)
@@ -244,6 +234,30 @@ func (m *Manager) Issue(ctx context.Context, c *store.Cert, action string, job *
 	_ = m.st.PutCert(c)
 
 	days := int(time.Until(leaf.NotAfter).Hours() / 24)
+
+	// 7. 外部部署
+	if c.DeployCertPath != "" || c.DeployKeyPath != "" || c.DeployCmd != "" {
+		job.AddLog("执行部署...")
+		r, derr := deploy.Apply(c, files)
+		if derr != nil {
+			// 证书本身已经签发成功，只是没写到目标位置。
+			// 保持 valid 状态、只记录部署错误，避免被当成签发失败而重复申请。
+			msg := "证书已签发，但部署失败: " + derr.Error()
+			c.LastError = msg
+			_ = m.st.PutCert(c)
+			job.AddLog("%s", msg)
+			m.st.AddEvent(c.ID, "error", msg)
+			m.notifier.Notify("证书部署失败: "+c.PrimaryDomain(), msg, "error")
+			return fmt.Errorf("%s", msg)
+		}
+		for _, p := range r.Paths {
+			job.AddLog("已写入 %s", p)
+		}
+		if r.Output != "" {
+			job.AddLog("重载输出: %s", truncate(r.Output, 300))
+		}
+	}
+
 	job.AddLog("完成，有效期至 %s（剩余 %d 天）", leaf.NotAfter.Local().Format("2006-01-02 15:04"), days)
 	m.st.AddEvent(c.ID, "success", fmt.Sprintf("%s成功，到期时间 %s",
 		actionText(action), leaf.NotAfter.Local().Format("2006-01-02")))

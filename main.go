@@ -150,6 +150,10 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatalf("读取设置失败: %v", err)
 	}
+	// 上次进程如果是被 kill 或崩溃的，会有证书卡在「进行中」，这里复位
+	if n, err := st.ResetIssuing(); err == nil && n > 0 {
+		log.Printf("已复位 %d 张残留的「进行中」证书状态", n)
+	}
 	// -listen 只覆盖本次运行，不写回数据库，避免一次性调试改掉服务端口
 	addr := ss.Get().Listen
 	if addr == "" {
@@ -559,20 +563,26 @@ func cmdRenew(args []string) {
 
 	now := time.Now()
 	var due []*store.Cert
+	var skipped []string
 	for _, c := range certs {
+		// 只在展示状态真的变化时才写库
+		before := c.Status
 		c.RefreshStatus(now)
-		_ = st.PutCert(c)
-		if !c.AutoRenew || c.Status == store.StatusRevoked {
-			continue
+		if c.Status != before {
+			_ = st.PutCert(c)
 		}
-		// 从未签发过的不自动申请，交给用户手动触发
-		if c.LastIssuedAt == "" || c.NotAfter == "" {
-			continue
-		}
-		if !c.NeedsRenew(now) {
+		// 和常驻模式的 scheduler 用同一套规则（退避、失败上限、手动 DNS 跳过）
+		ok, reason := scheduler.Decide(c, now, false)
+		if !ok {
+			if reason != "" && c.NeedsRenew(now) {
+				skipped = append(skipped, fmt.Sprintf("%s：%s", strings.Join(c.Domains, ","), reason))
+			}
 			continue
 		}
 		due = append(due, c)
+	}
+	for _, s := range skipped {
+		fmt.Printf("跳过 %s\n", s)
 	}
 
 	if len(due) == 0 {
@@ -583,10 +593,6 @@ func cmdRenew(args []string) {
 	failed := 0
 	for _, c := range due {
 		name := strings.Join(c.Domains, ",")
-		if c.Challenge == store.ChallengeDNSManual {
-			fmt.Printf("跳过 %s：手动 DNS 模式需要人工添加 TXT 记录，请在面板里操作\n", name)
-			continue
-		}
 		if *dryRun {
 			fmt.Printf("待续期: %s（剩余 %d 天）\n", name, c.DaysLeft())
 			continue

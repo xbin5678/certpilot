@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"certpilot/internal/acme"
@@ -13,6 +14,9 @@ import (
 type Scheduler struct {
 	st  *store.Store
 	mgr *acme.Manager
+
+	// warned 记录已经播报过「连续失败已达上限」的证书，避免每轮都写一条事件
+	warned sync.Map // certID -> struct{}
 }
 
 func New(st *store.Store, mgr *acme.Manager) *Scheduler {
@@ -63,28 +67,26 @@ func (s *Scheduler) RunOnce() (int, error) {
 	triggered := 0
 
 	for _, c := range certs {
-		// 刷新展示状态
+		// 只在展示状态真的变化时才写库。之前是每轮无条件 PutCert，
+		// 低配 VPS 上每 10 分钟对全表做一次 UPDATE，纯属写放大。
+		before := c.Status
 		c.RefreshStatus(now)
-		_ = s.st.PutCert(c)
+		if c.Status != before {
+			_ = s.st.PutCert(c)
+		}
 
-		if !c.AutoRenew || c.Status == store.StatusRevoked {
-			continue
+		// 达到失败上限时只播报一次，否则每 10 分钟刷一条同样的错误
+		if c.FailCount >= MaxFailCount {
+			if _, seen := s.warned.Load(c.ID); !seen {
+				s.warned.Store(c.ID, struct{}{})
+				s.st.AddEvent(c.ID, "error", "连续失败已达上限，已暂停自动续期，请手动处理")
+			}
+		} else {
+			s.warned.Delete(c.ID)
 		}
-		// 从未成功签发过的证书不自动申请，避免建好配置就半夜乱跑
-		if c.LastIssuedAt == "" || c.NotAfter == "" {
-			continue
-		}
-		if !c.NeedsRenew(now) {
-			continue
-		}
-		if s.mgr.Jobs().Running(c.ID) != nil {
-			continue
-		}
-		if c.FailCount > 0 && !backoffElapsed(c, now) {
-			continue
-		}
-		if c.FailCount >= 8 {
-			s.st.AddEvent(c.ID, "error", "连续失败 8 次，已暂停自动续期，请手动处理")
+
+		ok, _ := Decide(c, now, s.mgr.Jobs().Running(c.ID) != nil)
+		if !ok {
 			continue
 		}
 		if _, err := s.mgr.IssueAsync(c, "renew"); err != nil {
@@ -93,6 +95,44 @@ func (s *Scheduler) RunOnce() (int, error) {
 		triggered++
 	}
 	return triggered, nil
+}
+
+// MaxFailCount 连续失败多少次后暂停自动续期
+const MaxFailCount = 8
+
+// Decide 判断一张证书本轮是否该续期，返回 (是否续期, 跳过原因)。
+//
+// scheduler 和 `certpilot renew` 必须共用同一套规则：按需部署（默认）走的是
+// renew 子命令，如果那边少了退避和失败上限，失败的证书会每 6 小时重试一次、
+// 永不停止，而常驻模式却会退避 —— 同一份配置在两种部署方式下行为不一致。
+func Decide(c *store.Cert, now time.Time, jobRunning bool) (bool, string) {
+	if !c.AutoRenew {
+		return false, ""
+	}
+	if c.Status == store.StatusRevoked {
+		return false, ""
+	}
+	// 从未成功签发过的证书不自动申请，避免建好配置就半夜乱跑
+	if c.LastIssuedAt == "" || c.NotAfter == "" {
+		return false, ""
+	}
+	if !c.NeedsRenew(now) {
+		return false, ""
+	}
+	if jobRunning {
+		return false, ""
+	}
+	// 手动 DNS 需要人工加 TXT，自动发起只会挂在那里等 20 分钟
+	if c.Challenge == store.ChallengeDNSManual {
+		return false, "手动 DNS 模式需要人工添加 TXT 记录"
+	}
+	if c.FailCount >= MaxFailCount {
+		return false, "连续失败已达上限，已暂停自动续期"
+	}
+	if c.FailCount > 0 && !backoffElapsed(c, now) {
+		return false, "失败退避中"
+	}
+	return true, ""
 }
 
 // backoffElapsed 失败后退避：30 分钟 × 失败次数，最长 6 小时

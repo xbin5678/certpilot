@@ -83,12 +83,18 @@ func MultiCertReloader(pairs []CertPair) func(*tls.ClientHelloInfo) (*tls.Certif
 					continue
 				}
 				for _, n := range e.leaf.DNSNames {
-					if strings.HasPrefix(n, "*.") {
-						suffix := strings.ToLower(n[1:])
-						if strings.HasSuffix(name, suffix) &&
-							strings.Count(name, ".") == strings.Count(suffix, ".") {
-							return e.cert, nil
-						}
+					if !strings.HasPrefix(n, "*.") {
+						continue
+					}
+					suffix := strings.ToLower(n[1:]) // ".example.com"
+					if !strings.HasSuffix(name, suffix) {
+						continue
+					}
+					// 通配符只匹配一级：a.example.com 命中，a.b.example.com 不命中。
+					// 之前用「点数相等」来比较，但 name 比 suffix 多一个 label，
+					// 点数永远不等，导致通配符证书永远匹配不上。
+					if !strings.Contains(strings.TrimSuffix(name, suffix), ".") {
+						return e.cert, nil
 					}
 				}
 			}
@@ -118,8 +124,13 @@ func MultiCertReloader(pairs []CertPair) func(*tls.ClientHelloInfo) (*tls.Certif
 func ParseCertPairs(certs, keys string) ([]CertPair, error) {
 	cs := splitList(certs)
 	ks := splitList(keys)
+	if len(cs) == 0 && len(ks) == 0 {
+		return nil, nil // 两个都没给 = 不启用 HTTPS
+	}
+	// 只给一边属于配置错误。之前直接返回 nil,nil，结果是面板静默降级成
+	// 明文 HTTP —— 用户以为开了 HTTPS，其实密码在裸奔。
 	if len(cs) == 0 || len(ks) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("证书与私钥必须同时提供（证书 %d 个，私钥 %d 个）", len(cs), len(ks))
 	}
 	if len(cs) != len(ks) {
 		return nil, fmt.Errorf("证书与私钥数量不一致：%d vs %d", len(cs), len(ks))

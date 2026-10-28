@@ -116,9 +116,12 @@ func FetchZeroSSLEAB(email string) (kid, hmac string, err error) {
 	return out.EABKID, out.EABHMACKey, nil
 }
 
+// truncate 按字符（不是字节）截断，避免把 UTF-8 多字节字符切成乱码。
+// 日志里中文报错很常见，按字节切会输出 "\xe4\xbd" 这种残片。
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(r[:n]) + "..."
 }

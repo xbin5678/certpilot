@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -342,7 +343,8 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	job := s.mgr.Jobs().Create(c.ID, "revoke")
 	go func() {
-		if err := s.mgr.Revoke(r.Context(), c, job); err != nil {
+		// 不能用 r.Context()：请求一返回它就被取消，吊销会在半路被掐断
+		if err := s.mgr.Revoke(context.Background(), c, job); err != nil {
 			job.Finish(acme.JobError, err.Error())
 		} else {
 			job.Finish(acme.JobSuccess, "证书已吊销")

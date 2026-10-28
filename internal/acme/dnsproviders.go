@@ -146,14 +146,21 @@ func NewDNSProvider(id string, creds map[string]string) (challenge.Provider, err
 	if !ok {
 		return nil, fmt.Errorf("不支持的 DNS 服务商: %s", id)
 	}
+	// 拷贝一份再补默认值：直接改调用方的 map 有两个问题 ——
+	// 一是 nil map 赋值会 panic（旧数据或 CLI 路径可能传 nil），
+	// 二是会把默认值悄悄写回调用方的凭据表。
+	cp := make(map[string]string, len(creds)+2)
+	for k, v := range creds {
+		cp[k] = v
+	}
 	for _, f := range p.Fields {
-		if f.Required && creds[f.Key] == "" {
+		if f.Required && cp[f.Key] == "" {
 			if f.Default != "" {
-				creds[f.Key] = f.Default
+				cp[f.Key] = f.Default
 				continue
 			}
 			return nil, fmt.Errorf("%s 缺少必填项: %s", p.Name, f.Label)
 		}
 	}
-	return p.build(creds)
+	return p.build(cp)
 }
