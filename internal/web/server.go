@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,9 +12,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,11 +24,14 @@ import (
 	"certpilot/internal/compat"
 	"certpilot/internal/scheduler"
 	"certpilot/internal/store"
+	"certpilot/internal/task"
+	"certpilot/internal/terminal"
+	"certpilot/internal/xui"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
-//go:embed static/*
+//go:embed static
 var staticFS embed.FS
 
 // Server Web 管理后台
@@ -35,6 +41,11 @@ type Server struct {
 	det     *compat.Detector
 	sched   *scheduler.Scheduler
 	version string
+
+	xuiTasks *task.Manager
+	xuiInst  *xui.Installer
+	xuiMu    sync.Mutex // 保证「检查是否在装 + 创建任务」原子，避免并发双开
+	term     *terminal.Manager
 
 	inflight   int64         // 当前处理中的请求数
 	lastActive atomic.Int64  // 最后一次活动时间（UnixNano）
@@ -48,8 +59,22 @@ func New(st *store.Store, mgr *acme.Manager, det *compat.Detector, sched *schedu
 	s := &Server{
 		st: st, mgr: mgr, det: det, sched: sched, version: version,
 		getSet: getSet, setSet: setSet,
+		xuiTasks:   task.NewManager(),
+		xuiInst:    xui.NewInstaller(),
 		settingsMu: make(chan struct{}, 1),
 	}
+	// 终端的开关、shell、空闲超时都实时读设置，改设置后无需重启
+	s.term = terminal.NewManager(
+		func() bool { return s.getSet().TerminalEnabled },
+		func() string { return s.getSet().TerminalShell },
+		func() time.Duration {
+			m := s.getSet().TerminalIdleMinutes
+			if m <= 0 {
+				m = 15
+			}
+			return time.Duration(m) * time.Minute
+		},
+	)
 	s.lastActive.Store(time.Now().UnixNano())
 	return s
 }
@@ -95,6 +120,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/compat", s.auth(s.handleCompat))
 	mux.HandleFunc("GET /api/events", s.auth(s.handleEvents))
 	mux.HandleFunc("POST /api/check", s.auth(s.handleCheckNow))
+
+	// 3x-ui 一键安装
+	mux.HandleFunc("GET /api/xui/state", s.auth(s.handleXuiState))
+	mux.HandleFunc("POST /api/xui/install", s.auth(s.handleXuiInstall))
+	mux.HandleFunc("GET /api/xui/tasks", s.auth(s.handleXuiTaskList))
+	mux.HandleFunc("GET /api/xui/tasks/{id}", s.auth(s.handleXuiTask))
+
+	// Web 终端（需在设置里开启，且进入时二次验证密码）
+	mux.HandleFunc("GET /api/terminal", s.auth(s.handleTerminalStatus))
+	mux.HandleFunc("POST /api/terminal/ticket", s.auth(s.handleTerminalTicket))
+	mux.HandleFunc("GET /api/terminal/ws", s.handleTerminalWS)
+
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 
 	return s.trackActivity(s.logMiddleware(s.csrfMiddleware(mux)))
@@ -113,9 +150,14 @@ func (s *Server) trackActivity(next http.Handler) http.Handler {
 	})
 }
 
-// IdleFor 返回已空闲时长；有请求在处理时返回 0
+// IdleFor 返回已空闲时长；有请求在处理或有终端会话时返回 0
 func (s *Server) IdleFor() time.Duration {
 	if atomic.LoadInt64(&s.inflight) > 0 {
+		return 0
+	}
+	// WebSocket 终端是长连接，虽然 handler 未返回时 inflight 已经 > 0，
+	// 这里再兜一层，避免任何时序缝隙导致终端被"空闲退出"掐断。
+	if s.term != nil && s.term.Active() > 0 {
 		return 0
 	}
 	last := s.lastActive.Load()
@@ -159,6 +201,22 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack 必须透传，否则 WebSocket 升级拿不到底层连接
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("底层 ResponseWriter 不支持 hijack")
+	}
+	return h.Hijack()
+}
+
+// Flush 透传给需要流式输出的场景
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // csrfMiddleware 所有写操作必须带自定义头，配合 SameSite=Lax 抵御 CSRF

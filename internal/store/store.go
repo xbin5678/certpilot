@@ -161,6 +161,12 @@ func (s *Store) LoadSettings() (Settings, error) {
 			st.NotifyOnError = v == "1" || v == "true"
 		case "sessionSecret":
 			st.SessionSecret = v
+		case "terminalEnabled":
+			st.TerminalEnabled = v == "1" || v == "true"
+		case "terminalShell":
+			st.TerminalShell = v
+		case "terminalIdleMinutes":
+			fmt.Sscanf(v, "%d", &st.TerminalIdleMinutes)
 		case "eab":
 			var m map[string]EABCred
 			if json.Unmarshal([]byte(v), &m) == nil {
@@ -186,7 +192,10 @@ func (s *Store) SaveSettings(st Settings) error {
 		"telegramToken":     st.TelegramToken,
 		"telegramChatId":    st.TelegramChatID,
 		"sessionSecret":     st.SessionSecret,
+		"terminalShell":     st.TerminalShell,
 	}
+	kv["terminalEnabled"] = boolStr(st.TerminalEnabled)
+	kv["terminalIdleMinutes"] = fmt.Sprintf("%d", st.TerminalIdleMinutes)
 	kv["notifyOnRenew"] = boolStr(st.NotifyOnRenew)
 	kv["notifyOnError"] = boolStr(st.NotifyOnError)
 	if st.EAB != nil {

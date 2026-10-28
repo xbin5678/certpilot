@@ -552,6 +552,10 @@ type settingsView struct {
 	NotifyOnError    bool                     `json:"notifyOnError"`
 	EAB              map[string]store.EABCred `json:"eab"`
 	Listen           string                   `json:"listen"`
+
+	TerminalEnabled     bool   `json:"terminalEnabled"`
+	TerminalShell       string `json:"terminalShell"`
+	TerminalIdleMinutes int    `json:"terminalIdleMinutes"`
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -570,6 +574,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		NotifyOnError:    st.NotifyOnError,
 		EAB:              st.EAB,
 		Listen:           st.Listen,
+
+		TerminalEnabled:     st.TerminalEnabled,
+		TerminalShell:       st.TerminalShell,
+		TerminalIdleMinutes: st.TerminalIdleMinutes,
 	})
 }
 
@@ -587,6 +595,10 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		NotifyOnRenew    *bool                    `json:"notifyOnRenew"`
 		NotifyOnError    *bool                    `json:"notifyOnError"`
 		EAB              map[string]store.EABCred `json:"eab"`
+
+		TerminalEnabled     *bool   `json:"terminalEnabled"`
+		TerminalShell       *string `json:"terminalShell"`
+		TerminalIdleMinutes *int    `json:"terminalIdleMinutes"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -631,6 +643,27 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.EAB != nil {
 		st.EAB = req.EAB
+	}
+	if req.TerminalEnabled != nil {
+		st.TerminalEnabled = *req.TerminalEnabled
+	}
+	if req.TerminalShell != nil {
+		sh := strings.TrimSpace(*req.TerminalShell)
+		if sh != "" && !strings.HasPrefix(sh, "/") {
+			writeErr(w, 400, "shell 必须是绝对路径")
+			return
+		}
+		st.TerminalShell = sh
+	}
+	if req.TerminalIdleMinutes != nil {
+		m := *req.TerminalIdleMinutes
+		if m < 1 {
+			m = 1
+		}
+		if m > 720 {
+			m = 720
+		}
+		st.TerminalIdleMinutes = m
 	}
 	if err := s.setSet(st); err != nil {
 		writeErr(w, 500, err.Error())

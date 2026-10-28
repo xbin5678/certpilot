@@ -182,6 +182,11 @@ type Settings struct {
 	NotifyOnError     bool               `json:"notifyOnError"`
 	SessionSecret     string             `json:"sessionSecret"`
 	EAB               map[string]EABCred `json:"eab,omitempty"`
+
+	// Web 终端（默认关闭，属高危功能，需显式开启）
+	TerminalEnabled     bool   `json:"terminalEnabled"`
+	TerminalShell       string `json:"terminalShell"`
+	TerminalIdleMinutes int    `json:"terminalIdleMinutes"`
 }
 
 // DefaultSettings 出厂默认值
@@ -195,6 +200,10 @@ func DefaultSettings() Settings {
 		CompatCertDir:    "/root/cert",
 		NotifyOnRenew:    true,
 		NotifyOnError:    true,
+
+		TerminalEnabled:     false,
+		TerminalShell:       "/bin/bash",
+		TerminalIdleMinutes: 15,
 	}
 }
 

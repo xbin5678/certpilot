@@ -127,13 +127,19 @@ $$('.nav-item').forEach(btn => {
 });
 
 function switchView(v) {
+  // 离开终端页必须销毁 PTY 连接，否则 shell 会一直挂在服务器上
+  if (state.view === 'terminal' && v !== 'terminal') termDispose();
+  // 离开 3x-ui 页停止进度轮询
+  if (v !== 'xui' && state.xuiTimer) { clearTimeout(state.xuiTimer); state.xuiTimer = null; }
   state.view = v;
   $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   const titles = {
     overview: ['概览', '证书状态一览'],
     certs: ['证书', '申请、续期与部署'],
     paths: ['证书路径', '复制后填入 3x-ui 的证书设置'],
+    xui: ['3x-ui', '一键安装面板，与证书自动衔接'],
     compat: ['环境与兼容', '端口占用与 3x-ui 共存状态'],
+    terminal: ['终端', '在浏览器里直接操作这台服务器'],
     logs: ['日志', '最近的签发与变更记录'],
     settings: ['设置', 'ACME 账号、默认值与通知'],
   };
@@ -147,7 +153,9 @@ function render() {
   if (state.view === 'overview') renderOverview();
   else if (state.view === 'certs') renderCerts();
   else if (state.view === 'paths') renderPaths();
+  else if (state.view === 'xui') renderXui();
   else if (state.view === 'compat') renderCompat();
+  else if (state.view === 'terminal') renderTerminal();
   else if (state.view === 'logs') renderLogs();
   else if (state.view === 'settings') renderSettings();
 }
@@ -546,6 +554,16 @@ async function renderSettings() {
   });
   html += '</div>';
 
+  html += '<div class="section-title">网页终端</div><div class="card">' +
+    '<p class="hint" style="margin-top:0">启用后可以直接在浏览器里操作这台服务器，不用另开 SSH 客户端。' +
+    '注意：终端里是 <b>root shell</b>，进入时需要重新输入管理密码，会话空闲会自动断开。' +
+    '默认关闭，建议只在需要时临时打开。</p>' +
+    '<label class="switch"><input type="checkbox" id="set-term"' + (s.terminalEnabled ? ' checked' : '') + '>启用网页终端</label>' +
+    '<div class="form-row" style="margin-top:12px">' +
+    '<div class="field"><span>Shell 路径</span><input type="text" id="set-term-shell" value="' + esc(s.terminalShell || '/bin/bash') + '"></div>' +
+    '<div class="field"><span>空闲断开（分钟）</span><input type="number" id="set-term-idle" min="1" max="720" value="' + (s.terminalIdleMinutes || 15) + '"></div>' +
+    '</div></div>';
+
   html += '<div class="section-title">安全</div><div class="card">' +
     '<div class="form-row">' +
     '<div class="field"><span>原密码</span><input type="password" id="pw-old"></div>' +
@@ -584,6 +602,9 @@ async function saveSettings() {
     telegramChatId: $('#set-tgchat').value.trim(),
     notifyOnRenew: $('#set-n-renew').checked,
     notifyOnError: $('#set-n-err').checked,
+    terminalEnabled: $('#set-term').checked,
+    terminalShell: $('#set-term-shell').value.trim(),
+    terminalIdleMinutes: parseInt($('#set-term-idle').value, 10) || 15,
     eab: eab,
   };
   try {
@@ -945,6 +966,389 @@ async function saveCert(id) {
     toast('已保存', 'ok');
     render();
   } catch (e) { toast(e.message, 'bad'); }
+}
+
+/* ---------------- 3x-ui ---------------- */
+
+function xuiRandPass() {
+  const cs = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  const buf = new Uint32Array(16);
+  (window.crypto || window.msCrypto).getRandomValues(buf);
+  for (let i = 0; i < 16; i++) s += cs[buf[i] % cs.length];
+  return s;
+}
+
+function xuiPill(status) {
+  const map = {
+    running: ['安装中', 'info'],
+    success: ['完成', 'ok'],
+    error: ['失败', 'bad'],
+  };
+  const m = map[status] || [status, 'plain'];
+  return '<span class="pill ' + m[1] + '">' + m[0] + '</span>';
+}
+
+function xuiStateCard(d) {
+  const s = d.state || {};
+  const c = d.compat || {};
+  let h = '<div class="grid c3">';
+  if (s.installed) {
+    h += '<div class="card stat"><div class="k">3x-ui</div><div class="v">已安装</div>' +
+      '<div class="d">' + esc(s.version || '版本未知') + '</div></div>';
+    h += '<div class="card stat ' + (s.serviceActive ? 'ok' : 'bad') + '"><div class="k">服务</div>' +
+      '<div class="v">' + (s.serviceActive ? '运行中' : '未运行') + '</div><div class="d">systemd · x-ui</div></div>';
+    h += '<div class="card stat"><div class="k">面板端口</div><div class="v">' + (s.panelPort || '—') +
+      '</div><div class="d">' + esc(s.basePath ? '/' + s.basePath : '无路径前缀') + '</div></div>';
+  } else {
+    h += '<div class="card stat"><div class="k">3x-ui</div><div class="v">未安装</div>' +
+      '<div class="d">可以直接在下面一键安装</div></div>';
+    h += '<div class="card stat"><div class="k">80 端口</div><div class="v">' +
+      (c.port80 && c.port80.inUse ? '被占用' : '空闲') + '</div><div class="d">' +
+      esc((c.port80 && c.port80.owner) || '—') + '</div></div>';
+    h += '<div class="card stat"><div class="k">443 端口</div><div class="v">' +
+      (c.port443 && c.port443.inUse ? '被占用' : '空闲') + '</div><div class="d">' +
+      esc((c.port443 && c.port443.owner) || '—') + '</div></div>';
+  }
+  h += '</div>';
+
+  if (s.installed) {
+    h += '<div class="card" style="margin-top:14px"><h3>当前状态</h3><dl class="kv">' +
+      '<dt>可执行文件</dt><dd class="mono">' + esc(s.binaryPath || '—') + '</dd>' +
+      '<dt>数据目录</dt><dd class="mono">' + esc(s.dataDir || '/etc/x-ui') + '</dd>' +
+      '<dt>面板证书</dt><dd class="mono">' + esc(s.panelCert || '未设置（面板走 HTTP）') + '</dd>' +
+      '</dl></div>';
+  }
+  return h;
+}
+
+function xuiFormHTML(d) {
+  const s = d.state || {};
+  const def = d.defaults || {};
+  const installed = !!s.installed;
+  let h = '<div class="section-title">' + (installed ? '重新安装 / 升级' : '安装配置') + '</div><div class="card">';
+  h += '<p class="hint" style="margin-top:0">' +
+    (installed
+      ? '重新安装会复用 3x-ui 官方安装脚本，已有的数据库与入站配置会保留，面板端口与账号按下面填写的内容覆盖。'
+      : '调用 3x-ui 官方安装脚本的非交互模式安装，全程日志实时回传。SSL 建议先选「暂不配置」，装完后由 CertPilot 签发证书并部署，' +
+        '避免两套 ACME 客户端抢同一个 80 端口。') +
+    '</p>';
+
+  h += '<div class="form-row">' +
+    '<label class="field"><span>版本</span><input type="text" id="xui-version" placeholder="留空 = 最新稳定版"></label>' +
+    '<label class="field"><span>面板端口</span><input type="number" id="xui-port" min="1" max="65535" value="' +
+    (s.panelPort || def.port || 2053) + '"></label>' +
+    '</div>';
+
+  h += '<div class="form-row">' +
+    '<label class="field"><span>用户名</span><input type="text" id="xui-user" value="' + esc(def.username || 'admin') + '"></label>' +
+    '<label class="field"><span>密码</span><div class="input-row">' +
+    '<input type="text" id="xui-pass" value="' + xuiRandPass() + '">' +
+    '<button class="btn sm" type="button" onclick="document.getElementById(\'xui-pass\').value=xuiRandPass()">换一个</button>' +
+    '</div></label>' +
+    '</div>';
+
+  h += '<label class="field"><span>面板路径前缀（可选）</span>' +
+    '<input type="text" id="xui-basepath" placeholder="例如 panel；留空由官方脚本随机生成"></label>';
+
+  h += '<label class="field"><span>SSL 证书</span><select id="xui-ssl" onchange="onXuiSslChange()">' +
+    '<option value="none">暂不配置（推荐，装完由 CertPilot 签发）</option>' +
+    '<option value="ip">官方脚本为本机 IP 签证书（6 天，需 80 空闲）</option>' +
+    '<option value="domain">官方脚本为域名签证书（需域名已解析到本机）</option>' +
+    '</select></label>';
+
+  h += '<label class="field" id="xui-domain-field" hidden><span>域名</span>' +
+    '<input type="text" id="xui-domain" placeholder="panel.example.com"></label>';
+  h += '<label class="field" id="xui-email-field" hidden><span>ACME 邮箱</span>' +
+    '<input type="email" id="xui-email" placeholder="you@example.com"></label>';
+
+  if (installed) {
+    h += '<label class="switch" style="margin:14px 0 0"><input type="checkbox" id="xui-force" checked>覆盖安装（保留数据库）</label>';
+  }
+
+  h += '<div style="margin-top:16px;display:flex;gap:10px;align-items:center">' +
+    '<button class="btn primary" onclick="submitXuiInstall()"' + (d.supported === false ? ' disabled' : '') + '>' +
+    (installed ? '开始重装' : '一键安装 3x-ui') + '</button>' +
+    '<span class="form-hint" id="xui-form-hint"></span></div>';
+  h += '</div>';
+  return h;
+}
+
+function onXuiSslChange() {
+  const v = $('#xui-ssl').value;
+  $('#xui-domain-field').hidden = v !== 'domain';
+  $('#xui-email-field').hidden = v === 'none';
+}
+
+function xuiProgressHTML(t) {
+  const running = t.status === 'running';
+  let h = '<div class="section-title">安装进度</div><div class="card" id="xui-progress">';
+  h += '<div class="task-head">' + xuiPill(t.status) +
+    '<span class="task-msg">' + esc(t.message || '') + '</span>' +
+    (running ? '<span class="spin"></span>' : '') + '</div>';
+
+  h += '<ul class="steps">';
+  (t.steps || []).forEach(s => {
+    const icon = s.status === 'done' ? '✓' : s.status === 'error' ? '✕' :
+      s.status === 'running' ? '◌' : s.status === 'skip' ? '–' : '·';
+    h += '<li class="step ' + s.status + '"><span class="step-i">' + icon + '</span>' +
+      '<span class="step-n">' + esc(s.name) + '</span>' +
+      (s.detail ? '<span class="step-d">' + esc(s.detail) + '</span>' : '') + '</li>';
+  });
+  h += '</ul>';
+
+  if (t.result && t.result.url) {
+    const r = t.result;
+    h += '<div class="result-box"><div class="result-t">面板已就绪</div>' +
+      '<dl class="kv">' +
+      '<dt>地址</dt><dd class="mono">' + esc(r.url) + ' <button class="btn sm" onclick="copyText(\'' + esc(r.url).replace(/'/g, "\\'") + '\',\'面板地址\')">复制</button></dd>' +
+      '<dt>用户名</dt><dd class="mono">' + esc(r.username) + '</dd>' +
+      '<dt>密码</dt><dd class="mono">' + esc(r.password) + ' <button class="btn sm" onclick="copyText(\'' + esc(r.password).replace(/'/g, "\\'") + '\',\'密码\')">复制</button></dd>' +
+      '<dt>版本</dt><dd class="mono">' + esc(r.version || '—') + '</dd>' +
+      '</dl>' +
+      '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button class="btn" onclick="switchView(\'certs\')">去签发证书</button>' +
+      '<button class="btn" onclick="renderXui()">重新检查状态</button>' +
+      '<button class="btn" onclick="switchView(\'terminal\')">打开终端</button>' +
+      '</div></div>';
+  }
+
+  h += '<div class="log-head">执行日志' + (running ? '（实时）' : '') + '</div>';
+  h += '<pre class="log-box" id="xui-log">' + esc((t.logs || []).join('\n')) + '</pre>';
+  h += '</div>';
+  return h;
+}
+
+function xuiPaint(d, task) {
+  let html = xuiStateCard(d);
+  if (!d.supported) {
+    html += '<div class="card warn-card" style="margin-top:14px"><h3>当前环境不支持安装</h3>' +
+      '<p class="hint" style="margin:0">3x-ui 安装只能在 Linux 上执行。当前进程运行在其它系统上，下面的表单仅作预览。</p></div>';
+  }
+  if (task) html += xuiProgressHTML(task);
+  else if (d.installing && d.currentTask) html += xuiProgressHTML(d.currentTask);
+  else html += xuiFormHTML(d);
+  $('#content').innerHTML = html;
+  const box = $('#xui-log');
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+async function renderXui() {
+  if (state.xuiTimer) { clearTimeout(state.xuiTimer); state.xuiTimer = null; }
+  $('#content').innerHTML = '<div class="empty">加载中…</div>';
+  let d;
+  try { d = await api('/xui/state'); } catch (e) { $('#content').innerHTML = errBox(e); return; }
+  state.xui = d;
+  xuiPaint(d, null);
+  if (d.installing && d.currentTask) xuiPoll(d.currentTask.id);
+}
+
+function xuiPoll(id) {
+  if (state.view !== 'xui') return;
+  state.xuiTimer = setTimeout(async () => {
+    let t;
+    try { t = await api('/xui/tasks/' + id); } catch (e) {
+      state.xuiTimer = setTimeout(() => xuiPoll(id), 1500);
+      return;
+    }
+    xuiPaint(state.xui || {}, t);
+    if (t.status === 'running') {
+      xuiPoll(id);
+    } else {
+      state.xuiTimer = null;
+      try {
+        state.xui = await api('/xui/state');
+        xuiPaint(state.xui, t);
+        if (t.status === 'success') toast('3x-ui 安装完成', 'ok');
+        else toast(t.message || '安装失败', 'bad');
+      } catch (e) { /* 忽略刷新失败 */ }
+    }
+  }, 900);
+}
+
+async function submitXuiInstall() {
+  const hint = $('#xui-form-hint');
+  const body = {
+    version: $('#xui-version').value.trim(),
+    port: parseInt($('#xui-port').value, 10) || 0,
+    username: $('#xui-user').value.trim(),
+    password: $('#xui-pass').value,
+    basePath: $('#xui-basepath').value.trim(),
+    sslMode: $('#xui-ssl').value,
+    domain: $('#xui-domain') ? $('#xui-domain').value.trim() : '',
+    email: $('#xui-email') ? $('#xui-email').value.trim() : '',
+    force: $('#xui-force') ? $('#xui-force').checked : false,
+  };
+  if (hint) hint.textContent = '正在提交…';
+  try {
+    const r = await api('/xui/install', { method: 'POST', body: JSON.stringify(body) });
+    toast('安装已开始', 'ok');
+    state.xui = await api('/xui/state');
+    xuiPaint(state.xui, null);
+    xuiPoll(r.taskId);
+  } catch (e) {
+    if (hint) hint.textContent = '';
+    toast(e.message, 'bad');
+  }
+}
+
+/* ---------------- 终端 ---------------- */
+
+function termDispose() {
+  if (state.termResize) {
+    window.removeEventListener('resize', state.termResize);
+    state.termResize = null;
+  }
+  if (state.termWS) {
+    try { state.termWS.close(); } catch (e) { /* ignore */ }
+    state.termWS = null;
+  }
+  if (state.term) {
+    try { state.term.dispose(); } catch (e) { /* ignore */ }
+    state.term = null;
+  }
+  state.termFit = null;
+}
+
+async function renderTerminal() {
+  termDispose();
+  $('#content').innerHTML = '<div class="empty">加载中…</div>';
+  let d;
+  try { d = await api('/terminal'); } catch (e) { $('#content').innerHTML = errBox(e); return; }
+
+  if (!d.supported) {
+    $('#content').innerHTML = '<div class="card"><h3>当前平台不支持</h3>' +
+      '<p class="hint" style="margin:0">网页终端依赖 Linux PTY，只能在 Linux 服务器上使用。</p></div>';
+    return;
+  }
+  if (!d.enabled) {
+    $('#content').innerHTML = '<div class="card"><h3>网页终端未启用</h3>' +
+      '<p class="hint">这是一个高危功能：启用后，任何拿到面板密码的人都能以 <b>root</b> 身份在这台服务器上执行任意命令。' +
+      '默认关闭，需要你在设置里主动打开。</p>' +
+      '<button class="btn primary" onclick="switchView(\'settings\')">去设置里开启</button></div>';
+    return;
+  }
+
+  const busy = (d.sessions || []).length > 0;
+  let h = '<div class="card warn-card"><h3>⚠ 这是 root shell</h3>' +
+    '<p class="hint" style="margin:0">CertPilot 以 root 运行，终端里输入的命令直接以 root 执行，没有二次确认。' +
+    '会话空闲 ' + (d.idleMinutes || 15) + ' 分钟后自动断开；同时只允许一个会话；' +
+    '本程序只记录会话的开始与结束，<b>不记录你输入的内容</b>。</p></div>';
+
+  if (busy) {
+    h += '<div class="card" style="margin-top:14px"><h3>已有会话在运行</h3>' +
+      '<p class="hint" style="margin:0">为避免两个人抢同一个 shell，需要先在原会话里退出，或者等待空闲超时。</p></div>';
+    $('#content').innerHTML = h;
+    return;
+  }
+
+  h += '<div class="card" style="margin-top:14px"><h3>身份确认</h3>' +
+    '<p class="hint" style="margin-top:0">进入终端需要重新输入一次管理密码 —— 会话 cookie 单独不足以打开 root shell。</p>' +
+    '<div class="form-row"><label class="field"><span>管理密码</span>' +
+    '<input type="password" id="term-pass" autocomplete="current-password" placeholder="请输入管理密码"></label>' +
+    '<div style="display:flex;align-items:flex-end"><button class="btn primary" onclick="openTerminal()">打开终端</button></div>' +
+    '</div><div class="err" id="term-err"></div></div>';
+
+  $('#content').innerHTML = h;
+  setTimeout(() => { const el = $('#term-pass'); if (el) el.focus(); }, 50);
+  const inp = $('#term-pass');
+  if (inp) inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') openTerminal(); });
+}
+
+async function openTerminal() {
+  const el = $('#term-pass');
+  const errEl = $('#term-err');
+  if (errEl) errEl.textContent = '';
+  if (!el || !el.value) return;
+  try {
+    const r = await api('/terminal/ticket', { method: 'POST', body: JSON.stringify({ password: el.value }) });
+    mountTerminal(r.ticket);
+  } catch (e) {
+    if (errEl) errEl.textContent = e.message;
+    else toast(e.message, 'bad');
+  }
+}
+
+function mountTerminal(ticket) {
+  $('#content').innerHTML =
+    '<div class="term-wrap">' +
+    '<div class="term-bar">' +
+    '<span class="term-dot"></span><span class="term-title">root@' + esc(location.hostname) + '</span>' +
+    '<span class="term-status" id="term-status">连接中…</span>' +
+    '<button class="btn sm ghost" onclick="termFitWin()">适应窗口</button>' +
+    '<button class="btn sm danger" onclick="closeTerminal()">断开</button>' +
+    '</div>' +
+    '<div id="term" class="term-body"></div>' +
+    '</div>';
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    lineHeight: 1.25,
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Menlo, Consolas, "Courier New", monospace',
+    scrollback: 8000,
+    theme: {
+      background: '#0d1117', foreground: '#e6edf3', cursor: '#2dd4bf',
+      selectionBackground: '#264f78',
+      black: '#484f58', red: '#ff7b72', green: '#3fb950', yellow: '#d29922',
+      blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39c5cf', white: '#b1bac4',
+      brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364',
+      brightYellow: '#e3b341', brightBlue: '#79c0ff', brightMagenta: '#d2a8ff',
+      brightCyan: '#56d4dd', brightWhite: '#f0f6fc',
+    },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($('#term'));
+  state.term = term;
+  state.termFit = fit;
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(proto + '//' + location.host + '/api/terminal/ws?ticket=' + encodeURIComponent(ticket));
+  ws.binaryType = 'arraybuffer';
+  state.termWS = ws;
+
+  const setStatus = (txt, cls) => {
+    const el2 = $('#term-status');
+    if (el2) { el2.textContent = txt; el2.className = 'term-status ' + (cls || ''); }
+  };
+
+  ws.onopen = () => {
+    setStatus('已连接', 'ok');
+    termFitWin();
+    term.focus();
+  };
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') term.write(ev.data);
+    else term.write(new Uint8Array(ev.data));
+  };
+  ws.onclose = ev => {
+    setStatus('已断开', 'bad');
+    term.write('\r\n\x1b[33m── 连接已关闭' + (ev.reason ? '：' + ev.reason : '') + ' ──\x1b[0m\r\n');
+  };
+  ws.onerror = () => {
+    setStatus('连接出错', 'bad');
+    term.write('\r\n\x1b[31m── 连接出错，请刷新页面重试 ──\x1b[0m\r\n');
+  };
+
+  term.onData(d => { if (ws.readyState === 1) ws.send(d); });
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  });
+
+  state.termResize = () => { try { fit.fit(); } catch (e) { /* ignore */ } };
+  window.addEventListener('resize', state.termResize);
+}
+
+function termFitWin() {
+  if (!state.termFit) return;
+  try { state.termFit.fit(); } catch (e) { /* ignore */ }
+  if (state.term) state.term.focus();
+}
+
+function closeTerminal() {
+  termDispose();
+  renderTerminal();
 }
 
 /* ---------------- 启动 ---------------- */

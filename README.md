@@ -75,6 +75,19 @@ CertPilot 把证书管理从面板里独立出来：
 - 只读方式读取 3x-ui 的数据库，**绝不写入**
 - 输出针对当前端口占用情况的具体建议
 
+**一键安装 3x-ui**
+- 面板里点一下就把 3x-ui 装好，不用再 SSH 进去跑安装脚本
+- 调用官方 `install.sh` 的非交互模式（`XUI_NONINTERACTIVE=1`），不重写上游逻辑，不会随版本漂移
+- 面板端口、用户名、密码、路径前缀、SSL 方式都在表单里定，密码默认随机生成
+- 安装前体检：root 权限、systemd、端口占用、是否已安装；端口被占用时直接拦下而不是等脚本报错
+- 全程日志实时回传，装完自动验收二进制、服务状态与监听端口，并给出可复制的面板地址与账号
+
+**网页终端**
+- 浏览器里直接操作服务器，不用另开 SSH 客户端
+- 默认**关闭**，需在设置里显式开启；进入时要求重新输入管理密码
+- 同一时间只允许一个会话，空闲超时自动断开
+- 只记录会话生命周期，**不记录任何输入内容**（否则 sudo 密码、命令行里的密钥都会落进日志）
+
 **其他**
 - 单管理员密码（bcrypt）、HttpOnly 会话、CSRF 头校验
 - Webhook / Telegram 通知
@@ -264,6 +277,68 @@ certpilot issue -domain 203.0.113.10 -challenge http-01-standalone -email you@ex
 
 不要用 standalone。选 `dns-01` 或 `dns-01-manual`，一行端口都不碰。
 
+## 一键安装 3x-ui
+
+「3x-ui」页面点一下就能装。实现上不重写安装逻辑，而是调用官方脚本的非交互模式：
+
+```bash
+XUI_NONINTERACTIVE=1 XUI_USERNAME=... XUI_PANEL_PORT=... XUI_SSL_MODE=none bash install.sh
+```
+
+官方脚本已经处理了架构识别、release 校验和、systemd 单元与沙箱硬化、fail2ban、数据库迁移等细节，
+自己复刻只会随上游版本漂移。所以这里只做三件事：**装前体检、受控参数、装后验收**。
+
+**安装前会检查**
+
+| 检查项 | 不通过时 |
+|---|---|
+| root 权限 | 直接报错（写 systemd 单元需要 root） |
+| systemd 在运行 | 拒绝安装 |
+| 目标端口空闲 | 报错并指出占用进程 |
+| 是否已安装 | 提示改用「覆盖安装」，避免误重装 |
+
+**SSL 怎么选**
+
+默认「暂不配置」，装完由 CertPilot 签发证书再部署。这样只有一个 ACME 客户端在管 80 端口，
+不会出现 3x-ui 的 acme.sh 和 CertPilot 抢同一个端口、把对方续期搞失败的情况。
+
+如果想让官方脚本自己签，也可以选 IP 或域名模式，但要注意它要求 80 端口空闲。
+
+**装完之后**
+
+面板地址形如 `http://<ip>:<port>/<basePath>`。要换成 HTTPS：
+
+1. 到「证书」页给面板域名（或本机 IP）签发一张证书，部署路径填 `/root/cert/{domain}/`
+2. 到「证书路径」页复制两条路径，填进 3x-ui 的面板设置
+3. 或者直接执行 `x-ui setting -webCert ... -webCertKey ...`
+
+## 网页终端
+
+在浏览器里直接操作服务器。定位是「不想为了改一行配置去开 SSH 客户端」，不是替代 SSH。
+
+**默认关闭**，这是刻意的：CertPilot 以 root 运行，终端里就是 root shell，
+任何拿到面板密码的人都能拿到整台机器。
+
+开启后的防护：
+
+- 进入终端要**重新输入管理密码**，换取一次性票据（60 秒、用完即废）。
+  会话 cookie 单独不足以打开 root shell —— cookie 被 XSS 或中间人拿到时，攻击者仍然过不了这一关。
+- 票据走 WebSocket 的 URL 参数（浏览器 WebSocket 无法带自定义头），所以票据必须一次性且短命。
+- 同时只允许一个会话，避免两个人抢同一个 shell。
+- 空闲超时自动断开（默认 15 分钟，可调）。
+- 只记录会话的开始、结束、时长和流量，**不记录输入内容**。记命令听着美好，但 sudo 密码、
+  `mysql -p...`、写在命令行里的 token 都会原样进日志，弊大于利。要看历史就在终端里敲 `history`。
+
+**要不要开**
+
+面板只在你自己的内网或跳板机后面，可以开；面板直接暴露在公网且密码是弱口令，先别开。
+
+**实现**
+
+浏览器 ⇄ WebSocket ⇄ 本地 PTY（`creack/pty`）。Linux 上用登录 shell，非 Linux 平台返回「不支持」。
+WebSocket 升级需要透传 `http.Hijacker`，日志中间件里的 `statusWriter` 已经补上，
+否则升级会失败且只在服务端日志里看到一个含糊的错误。
+
 ## 配置
 
 配置存在 `<数据目录>/certpilot.db`（SQLite），包括：
@@ -276,6 +351,9 @@ certpilot issue -domain 203.0.113.10 -challenge http-01-standalone -email you@ex
 | `compatCertDir` | 3x-ui 证书目录前缀，默认 `/root/cert` |
 | `webhookUrl` / `telegramToken` / `telegramChatId` | 通知 |
 | `eab` | 各 CA 的外部账号绑定凭据（ZeroSSL 可用邮箱自动获取） |
+| `terminalEnabled` | 是否启用网页终端，默认 `false` |
+| `terminalShell` | 终端使用的 shell，默认 `/bin/bash` |
+| `terminalIdleMinutes` | 终端空闲断开时间，默认 15 分钟 |
 
 证书文件存放在 `<数据目录>/certs/<证书ID>/`：`fullchain.pem`、`privkey.pem`、`cert.pem`、`chain.pem`、`meta.json`。
 
@@ -302,6 +380,12 @@ GET    /api/jobs  /api/jobs/{id} 任务进度（含待添加的 TXT 记录）
 GET    /api/settings  PUT /api/settings
 GET    /api/cas  /api/dnsproviders  /api/compat  /api/events
 POST   /api/check                立即执行一轮续期检查
+GET    /api/xui/state            3x-ui 安装状态与默认参数
+POST   /api/xui/install          启动安装任务，返回 taskId
+GET    /api/xui/tasks  /api/xui/tasks/{id}
+GET    /api/terminal             终端可用性与活跃会话
+POST   /api/terminal/ticket      二次验证密码，换取一次性票据
+GET    /api/terminal/ws          升级 WebSocket（需 ticket 参数）
 ```
 
 ## 目录结构
@@ -314,6 +398,9 @@ internal/compat/         3x-ui 探测与端口守卫
 internal/deploy/         原子写入与重载
 internal/scheduler/      自动续期调度
 internal/notify/         Webhook / Telegram
+internal/task/           带步骤与日志的通用任务（安装进度）
+internal/xui/            3x-ui 一键安装
+internal/terminal/       网页终端（PTY + WebSocket）
 internal/web/            HTTP 服务与内嵌前端
 deploy/                  systemd 单元与安装脚本
 ```
@@ -330,6 +417,20 @@ deploy/                  systemd 单元与安装脚本
 - 所有写接口校验 `X-Requested-With`，配合 SameSite 抵御 CSRF
 - DNS API 凭据存在本地 SQLite，请确保数据目录权限为 `0750`
 - 建议使用最小权限的 DNS Token（如 Cloudflare 只给 Zone:DNS:Edit）
+
+### 两个高危功能
+
+**一键安装 3x-ui** 会以 root 身份执行从 GitHub 拉取的官方安装脚本。为了降低风险：
+
+- 脚本内容做基本校验（长度 + 关键函数名），防止拿到半截响应或错误页面就执行
+- 只从 `raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh` 固定地址下载，不跟随用户输入的 URL
+- 安装脚本运行在独立进程组里，超时会整组杀掉，不留残余子进程
+
+**网页终端**是 root shell，默认关闭。除了密码二次验证和一次性票据，还要注意：
+
+- 终端里的操作不受 CertPilot 的 CSRF / 审计保护，等价于直接 SSH 登录
+- 如果面板通过公网 IP 直接访问，务必用强密码，最好再套一层 nginx 的 IP 白名单或 mTLS
+- 不用的时候在设置里关掉
 
 ## 开发
 

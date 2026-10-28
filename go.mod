@@ -17,6 +17,8 @@ require (
 	github.com/aliyun/credentials-go v1.4.7 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/go-acme/alidns-20150109/v4 v4.7.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
