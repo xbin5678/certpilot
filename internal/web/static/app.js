@@ -562,7 +562,11 @@ async function renderSettings() {
     '<div class="form-row" style="margin-top:12px">' +
     '<div class="field"><span>Shell 路径</span><input type="text" id="set-term-shell" value="' + esc(s.terminalShell || '/bin/bash') + '"></div>' +
     '<div class="field"><span>空闲断开（分钟）</span><input type="number" id="set-term-idle" min="1" max="720" value="' + (s.terminalIdleMinutes || 15) + '"></div>' +
-    '</div></div>';
+    '</div>' +
+    '<label class="switch" style="margin-top:12px"><input type="checkbox" id="set-term-pwd"' + (s.terminalRequirePassword ? ' checked' : '') +
+    '>进入终端时要求再输一次密码（更严格，但每次都要输）</label>' +
+    '<p class="hint" style="margin-top:10px">默认不要求二次密码 —— 面板本身已经能通过部署命令执行任意命令，多问一次密码的边际收益有限。' +
+    '如果面板暴露在公网且你比较谨慎，可以打开这个开关。</p></div>';
 
   html += '<div class="section-title">安全</div><div class="card">' +
     '<div class="form-row">' +
@@ -605,6 +609,7 @@ async function saveSettings() {
     terminalEnabled: $('#set-term').checked,
     terminalShell: $('#set-term-shell').value.trim(),
     terminalIdleMinutes: parseInt($('#set-term-idle').value, 10) || 15,
+    terminalRequirePassword: $('#set-term-pwd').checked,
     eab: eab,
   };
   try {
@@ -1027,12 +1032,24 @@ function xuiFormHTML(d) {
   const def = d.defaults || {};
   const installed = !!s.installed;
   let h = '<div class="section-title">' + (installed ? '重新安装 / 升级' : '安装配置') + '</div><div class="card">';
+
+  if (installed) {
+    h += '<p class="hint" style="margin-top:0">本机已安装 3x-ui <b>' + esc(s.version || '版本未知') + '</b>，面板端口 <b>' +
+      (s.panelPort || '—') + '</b>' + (s.basePath ? '，路径前缀 <b>/' + esc(s.basePath) + '</b>' : '') + '。<br>' +
+      '重新安装调用官方脚本，会<b>沿用现有的端口、账号密码与路径前缀</b>，入站配置、数据库、证书路径全部保留，' +
+      '只更新二进制与 systemd 单元。服务会重启一次，xray 入站会短暂断流。</p>';
+    h += '<label class="field"><span>目标版本</span><input type="text" id="xui-version" placeholder="留空 = 最新稳定版"></label>';
+    h += '<label class="switch" style="margin:6px 0 0"><input type="checkbox" id="xui-force" checked>确认覆盖安装（保留数据库）</label>';
+    h += '<div style="margin-top:16px;display:flex;gap:10px;align-items:center">' +
+      '<button class="btn primary" onclick="submitXuiInstall()"' + (d.supported === false ? ' disabled' : '') + '>开始重装</button>' +
+      '<span class="form-hint" id="xui-form-hint"></span></div>';
+    h += '</div>';
+    return h;
+  }
+
   h += '<p class="hint" style="margin-top:0">' +
-    (installed
-      ? '重新安装会复用 3x-ui 官方安装脚本，已有的数据库与入站配置会保留，面板端口与账号按下面填写的内容覆盖。'
-      : '调用 3x-ui 官方安装脚本的非交互模式安装，全程日志实时回传。SSL 建议先选「暂不配置」，装完后由 CertPilot 签发证书并部署，' +
-        '避免两套 ACME 客户端抢同一个 80 端口。') +
-    '</p>';
+    '调用 3x-ui 官方安装脚本的非交互模式安装，全程日志实时回传。SSL 建议先选「暂不配置」，' +
+    '装完后由 CertPilot 签发证书并部署，避免两套 ACME 客户端抢同一个 80 端口。</p>';
 
   h += '<div class="form-row">' +
     '<label class="field"><span>版本</span><input type="text" id="xui-version" placeholder="留空 = 最新稳定版"></label>' +
@@ -1062,13 +1079,9 @@ function xuiFormHTML(d) {
   h += '<label class="field" id="xui-email-field" hidden><span>ACME 邮箱</span>' +
     '<input type="email" id="xui-email" placeholder="you@example.com"></label>';
 
-  if (installed) {
-    h += '<label class="switch" style="margin:14px 0 0"><input type="checkbox" id="xui-force" checked>覆盖安装（保留数据库）</label>';
-  }
-
   h += '<div style="margin-top:16px;display:flex;gap:10px;align-items:center">' +
     '<button class="btn primary" onclick="submitXuiInstall()"' + (d.supported === false ? ' disabled' : '') + '>' +
-    (installed ? '开始重装' : '一键安装 3x-ui') + '</button>' +
+    '一键安装 3x-ui</button>' +
     '<span class="form-hint" id="xui-form-hint"></span></div>';
   h += '</div>';
   return h;
@@ -1168,17 +1181,24 @@ function xuiPoll(id) {
 
 async function submitXuiInstall() {
   const hint = $('#xui-form-hint');
+  const cur = (state.xui && state.xui.state) || {};
   const body = {
     version: $('#xui-version').value.trim(),
-    port: parseInt($('#xui-port').value, 10) || 0,
-    username: $('#xui-user').value.trim(),
-    password: $('#xui-pass').value,
-    basePath: $('#xui-basepath').value.trim(),
-    sslMode: $('#xui-ssl').value,
-    domain: $('#xui-domain') ? $('#xui-domain').value.trim() : '',
-    email: $('#xui-email') ? $('#xui-email').value.trim() : '',
     force: $('#xui-force') ? $('#xui-force').checked : false,
   };
+  if (cur.installed) {
+    // 重装时端口与账号沿用现有配置，官方脚本会保留，不需要也不应该覆盖
+    body.port = cur.panelPort || 0;
+    body.sslMode = 'none';
+  } else {
+    body.port = parseInt($('#xui-port').value, 10) || 0;
+    body.username = $('#xui-user').value.trim();
+    body.password = $('#xui-pass').value;
+    body.basePath = $('#xui-basepath').value.trim();
+    body.sslMode = $('#xui-ssl').value;
+    body.domain = $('#xui-domain') ? $('#xui-domain').value.trim() : '';
+    body.email = $('#xui-email') ? $('#xui-email').value.trim() : '';
+  }
   if (hint) hint.textContent = '正在提交…';
   try {
     const r = await api('/xui/install', { method: 'POST', body: JSON.stringify(body) });
@@ -1230,20 +1250,32 @@ async function renderTerminal() {
   }
 
   const busy = (d.sessions || []).length > 0;
+  if (busy) {
+    $('#content').innerHTML = '<div class="card warn-card"><h3>已有会话在运行</h3>' +
+      '<p class="hint" style="margin:0">为避免两个人抢同一个 shell，需要先在原会话里退出，或者等待空闲超时。</p></div>';
+    return;
+  }
+
+  // 默认免二次密码：登录面板即可进终端，进入后自动连接
+  if (!d.requirePassword) {
+    $('#content').innerHTML = '<div class="empty">正在打开终端…</div>';
+    try {
+      const r = await api('/terminal/ticket', { method: 'POST', body: '{}' });
+      mountTerminal(r.ticket);
+    } catch (e) {
+      $('#content').innerHTML = errBox(e) +
+        '<div style="margin-top:12px"><button class="btn" onclick="renderTerminal()">重试</button></div>';
+    }
+    return;
+  }
+
   let h = '<div class="card warn-card"><h3>⚠ 这是 root shell</h3>' +
     '<p class="hint" style="margin:0">CertPilot 以 root 运行，终端里输入的命令直接以 root 执行，没有二次确认。' +
     '会话空闲 ' + (d.idleMinutes || 15) + ' 分钟后自动断开；同时只允许一个会话；' +
     '本程序只记录会话的开始与结束，<b>不记录你输入的内容</b>。</p></div>';
 
-  if (busy) {
-    h += '<div class="card" style="margin-top:14px"><h3>已有会话在运行</h3>' +
-      '<p class="hint" style="margin:0">为避免两个人抢同一个 shell，需要先在原会话里退出，或者等待空闲超时。</p></div>';
-    $('#content').innerHTML = h;
-    return;
-  }
-
   h += '<div class="card" style="margin-top:14px"><h3>身份确认</h3>' +
-    '<p class="hint" style="margin-top:0">进入终端需要重新输入一次管理密码 —— 会话 cookie 单独不足以打开 root shell。</p>' +
+    '<p class="hint" style="margin-top:0">你在设置里开启了「进入终端时要求再输一次密码」，所以这里需要确认一次身份。</p>' +
     '<div class="form-row"><label class="field"><span>管理密码</span>' +
     '<input type="password" id="term-pass" autocomplete="current-password" placeholder="请输入管理密码"></label>' +
     '<div style="display:flex;align-items:flex-end"><button class="btn primary" onclick="openTerminal()">打开终端</button></div>' +

@@ -48,6 +48,20 @@ func TestValidateNormalizesEmptySSLMode(t *testing.T) {
 	}
 }
 
+// 重装已有实例时，官方脚本会保留原有端口与账号密码，
+// 因此这两个字段留空是合法的，不能被校验拦下。
+func TestValidateReinstallWithoutCredentials(t *testing.T) {
+	o := InstallOptions{Force: true, SSLMode: "none"}
+	if err := o.Validate(); err != nil {
+		t.Fatalf("重装且沿用现有配置时不应报错: %v", err)
+	}
+	// 但没勾覆盖安装、端口又是 0，就必须报错
+	o2 := InstallOptions{Port: 0, Username: "admin", Password: "12345678", SSLMode: "none"}
+	if err := o2.Validate(); err == nil {
+		t.Fatal("新装时端口为 0 应报错")
+	}
+}
+
 func TestRandomPassword(t *testing.T) {
 	a, b := RandomPassword(), RandomPassword()
 	if len(a) != 16 {

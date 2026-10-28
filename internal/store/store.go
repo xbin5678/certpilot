@@ -167,6 +167,8 @@ func (s *Store) LoadSettings() (Settings, error) {
 			st.TerminalShell = v
 		case "terminalIdleMinutes":
 			fmt.Sscanf(v, "%d", &st.TerminalIdleMinutes)
+		case "terminalRequirePassword":
+			st.TerminalRequirePassword = v == "1" || v == "true"
 		case "eab":
 			var m map[string]EABCred
 			if json.Unmarshal([]byte(v), &m) == nil {
@@ -196,6 +198,7 @@ func (s *Store) SaveSettings(st Settings) error {
 	}
 	kv["terminalEnabled"] = boolStr(st.TerminalEnabled)
 	kv["terminalIdleMinutes"] = fmt.Sprintf("%d", st.TerminalIdleMinutes)
+	kv["terminalRequirePassword"] = boolStr(st.TerminalRequirePassword)
 	kv["notifyOnRenew"] = boolStr(st.NotifyOnRenew)
 	kv["notifyOnError"] = boolStr(st.NotifyOnError)
 	if st.EAB != nil {

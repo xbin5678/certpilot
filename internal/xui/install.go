@@ -105,10 +105,24 @@ func Detect() State {
 			}
 		}
 	}
-	if out, err := runQuick(4*time.Second, st.BinaryPath, "version"); err == nil {
-		st.Version = strings.TrimSpace(out)
+	// 3x-ui 的版本号只能用 -v 取；不带参数运行它会真的去启动服务，
+	// 而 `version` 不是合法子命令（会打印一大坨 usage）。
+	if out, err := runQuick(4*time.Second, st.BinaryPath, "-v"); err == nil {
+		st.Version = sanitizeVersion(out)
 	}
 	return st
+}
+
+var verRe = regexp.MustCompile(`^v?\d+(\.\d+){1,3}([-+.\w]*)?$`)
+
+// sanitizeVersion 只接受形如 3.6.0 / v3.6.0 的字符串。
+// 二进制返回 usage、报错或者空内容时一律留空，避免把几百行帮助文本塞进界面。
+func sanitizeVersion(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 || len(s) > 32 || !verRe.MatchString(s) {
+		return ""
+	}
+	return s
 }
 
 // DefaultOptions 给出安全默认值。密码每次随机，避免出现"默认弱口令"。
@@ -123,14 +137,22 @@ func DefaultOptions() InstallOptions {
 
 // Validate 参数校验
 func (o *InstallOptions) Validate() error {
-	if o.Port < 1 || o.Port > 65535 {
+	// 重装已有实例时端口可以留 0：官方脚本检测到已有配置后会沿用原端口，
+	// 不会读 XUI_PANEL_PORT。
+	if o.Port == 0 && o.Force {
+		// 沿用现有端口
+	} else if o.Port < 1 || o.Port > 65535 {
 		return fmt.Errorf("面板端口不合法")
 	}
-	if len(o.Username) < 3 {
-		return fmt.Errorf("用户名至少 3 位")
-	}
-	if len(o.Password) < 8 {
-		return fmt.Errorf("密码至少 8 位")
+	// 重装已有实例时账号密码可以留空：官方脚本检测到已存在非默认凭据后
+	// 会沿用原来的账号密码，不会覆盖。留空即表示「沿用现有」。
+	if o.Username != "" || o.Password != "" {
+		if len(o.Username) < 3 {
+			return fmt.Errorf("用户名至少 3 位")
+		}
+		if len(o.Password) < 8 {
+			return fmt.Errorf("密码至少 8 位")
+		}
 	}
 	switch o.SSLMode {
 	case "", "none":
@@ -204,8 +226,12 @@ func (in *Installer) Run(ctx context.Context, opts InstallOptions, t *task.Task)
 	if cur.Installed {
 		t.Log("检测到已安装的 3x-ui（%s），将以覆盖方式重新安装，配置数据库会保留", orDash(cur.Version))
 	}
-	if st := checkPortFree(opts.Port); st != "" {
-		return fail(t, idx[0], fmt.Sprintf("端口 %d 已被 %s 占用，请换一个端口", opts.Port, st))
+	// 端口检查只对新装有意义：重装时目标端口正被现有的 3x-ui 自己监听，
+	// 脚本会先停服务再绑定，此时判定"被占用"是误报。
+	if !cur.Installed && opts.Port > 0 {
+		if st := checkPortFree(opts.Port); st != "" {
+			return fail(t, idx[0], fmt.Sprintf("端口 %d 已被 %s 占用，请换一个端口", opts.Port, st))
+		}
 	}
 	t.EndStep(idx[0], "通过")
 
@@ -257,7 +283,9 @@ func (in *Installer) Run(ctx context.Context, opts InstallOptions, t *task.Task)
 		host = detectPublicIP(ctx, in.HTTP)
 	}
 	scheme := "http"
-	if opts.SSLMode != "none" {
+	// 面板已经有证书（重装时会沿用原有证书配置）就走 https，
+	// 否则拼出来的地址会让用户以为面板是明文
+	if opts.SSLMode != "none" || after.PanelCert != "" {
 		scheme = "https"
 	}
 	url := fmt.Sprintf("%s://%s:%d", scheme, host, port)
@@ -336,16 +364,25 @@ func (in *Installer) runScript(ctx context.Context, script string, opts InstallO
 	cmd.Dir = os.TempDir()
 	cmd.Env = append(os.Environ(),
 		"XUI_NONINTERACTIVE=1",
-		"XUI_USERNAME="+opts.Username,
-		"XUI_PASSWORD="+opts.Password,
-		"XUI_PANEL_PORT="+fmt.Sprint(opts.Port),
-		"XUI_WEB_BASE_PATH="+opts.BasePath,
 		"XUI_SSL_MODE="+opts.SSLMode,
 		"XUI_ACME_EMAIL="+opts.Email,
 		"XUI_SERVER_IP="+opts.ServerIP,
 		"XUI_DB_TYPE=sqlite",
 		"DEBIAN_FRONTEND=noninteractive",
 	)
+	if opts.Port > 0 {
+		cmd.Env = append(cmd.Env, "XUI_PANEL_PORT="+fmt.Sprint(opts.Port))
+	}
+	// 留空则不传，让官方脚本沿用数据库里已有的凭据，避免重装把密码改掉
+	if opts.Username != "" {
+		cmd.Env = append(cmd.Env, "XUI_USERNAME="+opts.Username)
+	}
+	if opts.Password != "" {
+		cmd.Env = append(cmd.Env, "XUI_PASSWORD="+opts.Password)
+	}
+	if opts.BasePath != "" {
+		cmd.Env = append(cmd.Env, "XUI_WEB_BASE_PATH="+opts.BasePath)
+	}
 	if opts.SSLMode == "domain" {
 		cmd.Env = append(cmd.Env, "XUI_DOMAIN="+opts.Domain)
 	}

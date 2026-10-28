@@ -556,6 +556,8 @@ type settingsView struct {
 	TerminalEnabled     bool   `json:"terminalEnabled"`
 	TerminalShell       string `json:"terminalShell"`
 	TerminalIdleMinutes int    `json:"terminalIdleMinutes"`
+
+	TerminalRequirePassword bool `json:"terminalRequirePassword"`
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -578,6 +580,8 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		TerminalEnabled:     st.TerminalEnabled,
 		TerminalShell:       st.TerminalShell,
 		TerminalIdleMinutes: st.TerminalIdleMinutes,
+
+		TerminalRequirePassword: st.TerminalRequirePassword,
 	})
 }
 
@@ -599,6 +603,8 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		TerminalEnabled     *bool   `json:"terminalEnabled"`
 		TerminalShell       *string `json:"terminalShell"`
 		TerminalIdleMinutes *int    `json:"terminalIdleMinutes"`
+
+		TerminalRequirePassword *bool `json:"terminalRequirePassword"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -664,6 +670,9 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			m = 720
 		}
 		st.TerminalIdleMinutes = m
+	}
+	if req.TerminalRequirePassword != nil {
+		st.TerminalRequirePassword = *req.TerminalRequirePassword
 	}
 	if err := s.setSet(st); err != nil {
 		writeErr(w, 500, err.Error())

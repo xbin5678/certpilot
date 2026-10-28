@@ -187,6 +187,9 @@ type Settings struct {
 	TerminalEnabled     bool   `json:"terminalEnabled"`
 	TerminalShell       string `json:"terminalShell"`
 	TerminalIdleMinutes int    `json:"terminalIdleMinutes"`
+	// TerminalRequirePassword 进入终端时是否再输一次管理密码。
+	// 默认 false：面板本身已能通过部署命令执行任意命令，多问一次密码边际收益有限。
+	TerminalRequirePassword bool `json:"terminalRequirePassword"`
 }
 
 // DefaultSettings 出厂默认值

@@ -321,9 +321,12 @@ XUI_NONINTERACTIVE=1 XUI_USERNAME=... XUI_PANEL_PORT=... XUI_SSL_MODE=none bash 
 
 开启后的防护：
 
-- 进入终端要**重新输入管理密码**，换取一次性票据（60 秒、用完即废）。
-  会话 cookie 单独不足以打开 root shell —— cookie 被 XSS 或中间人拿到时，攻击者仍然过不了这一关。
-- 票据走 WebSocket 的 URL 参数（浏览器 WebSocket 无法带自定义头），所以票据必须一次性且短命。
+- **默认不再重复要密码**：登录面板后点「终端」直接连上。理由是面板本身已经能通过「部署命令」
+  执行任意命令，终端再多问一次密码的边际收益很小，纯粹折腾人。想要更严可以在设置里打开
+  「进入终端时要求再输一次密码」。
+- 无论哪种模式，都走**一次性票据**（60 秒、用完即废）。票据经 WebSocket 的 URL 参数传递
+  （浏览器 WebSocket 无法带自定义头），所以必须一次性且短命 —— 它挡的是别人直接构造
+  WebSocket 请求或在别处复用 URL，不是替代登录。
 - 同时只允许一个会话，避免两个人抢同一个 shell。
 - 空闲超时自动断开（默认 15 分钟，可调）。
 - 只记录会话的开始、结束、时长和流量，**不记录输入内容**。记命令听着美好，但 sudo 密码、
@@ -354,6 +357,7 @@ WebSocket 升级需要透传 `http.Hijacker`，日志中间件里的 `statusWrit
 | `terminalEnabled` | 是否启用网页终端，默认 `false` |
 | `terminalShell` | 终端使用的 shell，默认 `/bin/bash` |
 | `terminalIdleMinutes` | 终端空闲断开时间，默认 15 分钟 |
+| `terminalRequirePassword` | 进入终端是否再输一次密码，默认 `false` |
 
 证书文件存放在 `<数据目录>/certs/<证书ID>/`：`fullchain.pem`、`privkey.pem`、`cert.pem`、`chain.pem`、`meta.json`。
 
@@ -426,11 +430,12 @@ deploy/                  systemd 单元与安装脚本
 - 只从 `raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh` 固定地址下载，不跟随用户输入的 URL
 - 安装脚本运行在独立进程组里，超时会整组杀掉，不留残余子进程
 
-**网页终端**是 root shell，默认关闭。除了密码二次验证和一次性票据，还要注意：
+**网页终端**是 root shell，默认关闭。注意：
 
 - 终端里的操作不受 CertPilot 的 CSRF / 审计保护，等价于直接 SSH 登录
-- 如果面板通过公网 IP 直接访问，务必用强密码，最好再套一层 nginx 的 IP 白名单或 mTLS
-- 不用的时候在设置里关掉
+- 默认免二次密码，所以**面板密码的强度就是服务器的强度**。如果面板通过公网 IP 直接访问，
+  务必用强密码，最好再套一层 nginx 的 IP 白名单或 mTLS
+- 想更保守可以打开「进入终端时要求再输一次密码」，或干脆不用时在设置里关掉
 
 ## 开发
 

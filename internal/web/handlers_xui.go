@@ -2,8 +2,10 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"certpilot/internal/xui"
@@ -43,6 +45,17 @@ func (s *Server) handleXuiInstall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 同步预检：已安装但没勾「覆盖安装」时直接告诉用户，不让他等一个注定失败的任务
+	if cur := xui.Detect(); cur.Installed && !opts.Force {
+		ver := cur.Version
+		if ver == "" {
+			ver = "已安装版本"
+		} else {
+			ver = "v" + strings.TrimPrefix(ver, "v")
+		}
+		writeErr(w, 400, fmt.Sprintf("本机已安装 3x-ui（%s），如需升级或重装请勾选「覆盖安装」", ver))
+		return
+	}
 	if t := s.xuiTasks.Running("install"); t != nil {
 		writeErr(w, 409, "已有安装任务在执行，请等待完成")
 		return
@@ -54,7 +67,11 @@ func (s *Server) handleXuiInstall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	t := s.xuiTasks.Create("install")
-	t.Log("目标：3x-ui %s，面板端口 %d，SSL 模式 %s", orAuto(opts.Version), opts.Port, opts.SSLMode)
+	if opts.Port > 0 {
+		t.Log("目标：3x-ui %s，面板端口 %d，SSL 模式 %s", orAuto(opts.Version), opts.Port, opts.SSLMode)
+	} else {
+		t.Log("目标：3x-ui %s，沿用现有面板端口，SSL 模式 %s", orAuto(opts.Version), opts.SSLMode)
+	}
 	s.st.AddEvent("", "info", "开始安装 3x-ui")
 
 	// 不能用 r.Context()：请求返回后会被取消，安装必须继续跑
