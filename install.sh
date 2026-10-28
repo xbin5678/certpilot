@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # CertPilot 安装 / 升级 / 卸载脚本
 #
-# 在线安装：
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | sudo bash
+# 在线安装（用 Release 里的脚本，仓库地址已配置好）：
+#   curl -fsSL https://github.com/xbin5678/certpilot/releases/latest/download/install.sh | sudo bash
+#
+# 也可以从源码仓库直接跑，但要显式告诉它仓库地址：
+#   curl -fsSL https://raw.githubusercontent.com/xbin5678/certpilot/main/install.sh \
+#     | sudo bash -s -- --repo xbin5678/certpilot
 #
 # 离线安装（把本脚本和 certpilot 二进制放同一目录）：
 #   sudo ./install.sh
@@ -169,7 +173,17 @@ fetch_binary() {
   # 用"是否包含斜杠"来判断，避免哨兵字符串被 CI 替换后把判断逻辑改坏
   case "$REPO" in
     */*) : ;;
-    *) die "尚未配置仓库地址。请用 --repo owner/repo 指定，或把二进制放在脚本同目录离线安装" ;;
+    *)
+      die "本脚本是直接从源码仓库下载的，仓库地址占位符还没被替换，无法定位二进制。
+
+  改用 Release 里那份已配置好的脚本（推荐）：
+    curl -fsSL https://github.com/<用户名>/certpilot/releases/latest/download/install.sh | sudo bash
+
+  或者显式指定仓库：
+    curl -fsSL https://raw.githubusercontent.com/<用户名>/certpilot/main/install.sh | sudo bash -s -- --repo <用户名>/certpilot
+
+  离线安装：把 certpilot 二进制放在本脚本同目录，再 sudo ./install.sh"
+      ;;
   esac
 
   local base url

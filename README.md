@@ -99,13 +99,17 @@ CertPilot 把证书管理从面板里独立出来：
 ### 方式一：一条命令（在线）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xbin5678/certpilot/main/install.sh | sudo bash
+curl -fsSL https://github.com/xbin5678/certpilot/releases/latest/download/install.sh | sudo bash
 ```
+
+> 注意这里用的是 **Release 里的脚本**，不是源码仓库里那份。源码里的 `install.sh` 带着
+> `__REPO_SLUG__` 占位符，由 CI 在打包 Release 时替换成实际仓库地址；直接跑源码版会报
+> "仓库地址占位符还没被替换"。如果你确实想跑源码版，加 `--repo 用户名/certpilot` 即可。
 
 带参数安装（端口、管理员密码、ACME 邮箱）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xbin5678/certpilot/main/install.sh \
+curl -fsSL https://github.com/xbin5678/certpilot/releases/latest/download/install.sh \
   | sudo bash -s -- --port 9443 --password 'YourPass123' --email you@example.com
 ```
 

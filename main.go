@@ -273,7 +273,16 @@ func isAddrInUse(err error) bool {
 
 // watchIdle 空闲超时后通知主流程退出
 func watchIdle(srv *web.Server, mgr *acme.Manager, timeout time.Duration, done chan struct{}) {
-	t := time.NewTicker(30 * time.Second)
+	// 检查间隔不能超过超时时间本身：原来写死 30 秒，配 -idle-timeout 15s 时
+	// 要等满 30 秒才第一次检查，看起来就像"空闲退出没生效"。
+	iv := timeout / 2
+	if iv > 30*time.Second {
+		iv = 30 * time.Second
+	}
+	if iv < time.Second {
+		iv = time.Second
+	}
+	t := time.NewTicker(iv)
 	defer t.Stop()
 	for range t.C {
 		if mgr.Jobs().AnyRunning() > 0 {

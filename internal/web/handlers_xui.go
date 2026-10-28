@@ -14,6 +14,12 @@ import (
 // handleXuiState 返回本机 3x-ui 现状，用于页面顶部状态卡
 func (s *Server) handleXuiState(w http.ResponseWriter, r *http.Request) {
 	st := xui.Detect()
+	// 证书路径由 compat 探测器读取（走 x-ui setting -getCert），
+	// xui 包只管安装，不重复读一遍
+	comp := s.det.Get()
+	if st.PanelCert == "" {
+		st.PanelCert = comp.PanelCert
+	}
 	running := s.xuiTasks.Running("install")
 	out := map[string]any{
 		"state":        st,
@@ -21,7 +27,7 @@ func (s *Server) handleXuiState(w http.ResponseWriter, r *http.Request) {
 		"installing":   running != nil,
 		"defaults":     xui.DefaultOptions(),
 		"listen":       s.getSet().Listen,
-		"compat":       s.det.Get(),
+		"compat":       comp,
 		"recentTasks":  s.xuiTasks.List(5),
 		"scriptSource": "https://github.com/MHSanaei/3x-ui",
 	}

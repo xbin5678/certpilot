@@ -234,6 +234,18 @@ func (m *Manager) ServeWS(ctx context.Context, w http.ResponseWriter, r *http.Re
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// 客户端断开（关标签页、网络断）时，ptmx.Read 是阻塞的，不会自己返回。
+	// 注意：creack/pty 打开的 master fd 是阻塞模式（没有 O_NONBLOCK），
+	// 不受 Go netpoller 管理，所以**单纯 ptmx.Close() 中断不了已经阻塞的 read**。
+	// 必须先把子进程杀掉，让 slave 端全部关闭，master 上的 read 才会返回 EIO。
+	go func() {
+		<-ctx.Done()
+		if proc != nil && proc.Process != nil {
+			_ = proc.Process.Kill()
+		}
+		_ = ptmx.Close()
+	}()
+
 	// 空闲看门狗
 	go func() {
 		iv := m.idleTimeout()
