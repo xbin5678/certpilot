@@ -237,19 +237,27 @@ func portOwner(port int) string {
 			return ""
 		}
 	}
+	return parsePortOwner(out, port)
+}
+
+// parsePortOwner 从 ss 的输出里挑出监听指定端口的进程名。
+// 单独拆出来是为了能拿真实输出做单元测试——之前这段逻辑写错了，
+// 标记取成 `users:((`（少了结尾的引号），于是 rest 以引号开头、
+// end 恒为 0，`end > 0` 永远不成立，任何端口都被判成「未知进程」。
+func parsePortOwner(out string, port int) string {
 	suffix := fmt.Sprintf(":%d", port)
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
 			continue
 		}
-		local := fields[3]
-		if !strings.HasSuffix(local, suffix) {
+		if !strings.HasSuffix(fields[3], suffix) {
 			continue
 		}
-		if idx := strings.Index(line, "users:(("); idx >= 0 {
-			rest := line[idx+len("users:(("):]
-			if end := strings.Index(rest, "\""); end > 0 {
+		const marker = `users:(("`
+		if idx := strings.Index(line, marker); idx >= 0 {
+			rest := line[idx+len(marker):]
+			if end := strings.Index(rest, `"`); end > 0 {
 				return rest[:end]
 			}
 		}
