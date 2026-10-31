@@ -113,6 +113,29 @@ curl -fsSL https://github.com/xbin5678/certpilot/releases/latest/download/instal
   | sudo bash -s -- --port 9443 --password 'YourPass123' --email you@example.com
 ```
 
+### 面板直接上 HTTPS（推荐）
+
+面板跑在公网上就别用明文 HTTP 传管理密码了。装的时候把证书给它：
+
+```bash
+# 自动扫描 /root/cert/*/ 下现成的证书对（3x-ui 约定的目录），有几张挂几张
+curl -fsSL https://github.com/xbin5678/certpilot/releases/latest/download/install.sh \
+  | sudo bash -s -- --tls auto
+
+# 或者自己指定，多个证书用逗号分隔，按 SNI 自动选择
+curl -fsSL https://github.com/xbin5678/certpilot/releases/latest/download/install.sh \
+  | sudo bash -s -- \
+      --tls-cert /root/cert/a.example.com/fullchain.pem,/root/cert/203.0.113.10/fullchain.pem \
+      --tls-key  /root/cert/a.example.com/privkey.pem,/root/cert/203.0.113.10/privkey.pem
+```
+
+- 脚本会在写 systemd 单元前校验证书与私钥是否配对，配错直接报错，不会把面板起成一个打不开的服务
+- 证书续期后按文件 mtime 热加载，**不用重启面板**
+- 一旦启用，明文 `http://` 就不再可用；升级时如果没再传 `--tls-*`，脚本会从现有单元里沿用上次的证书路径，不会悄悄退回 HTTP
+
+> 顺序上有个先后问题：证书得先有。所以常见做法是先 `--tls auto` 装一遍（此时 `/root/cert` 里已经有 3x-ui 的证书），
+> 或者先用 HTTP 装好、签出第一张证书后再跑一次 `--tls auto` 重装。
+
 ### 方式二：离线包
 
 把 `certpilot-offline-amd64.tar.gz` 上传到服务器：
@@ -212,13 +235,13 @@ make bundle    # dist/certpilot-offline-amd64.tar.gz（离线包）
 
 ```bash
 go build -o certpilot .
-sudo ./certpilot serve -data ./data -listen :8443
+sudo ./certpilot serve -data ./data -listen :9443
 ```
 
 ## 命令行
 
 ```bash
-certpilot serve   [-listen :8443] [-data DIR] \
+certpilot serve   [-listen :9443] [-data DIR] \
                   [-tls-cert fullchain.pem] [-tls-key privkey.pem]   启动 Web 后台（带 TLS 参数则启用 HTTPS）
 certpilot doctor  [-data DIR]                     体检
 certpilot list    [-data DIR]                     列出证书
@@ -267,7 +290,7 @@ certpilot issue -domain 203.0.113.10 -challenge http-01-standalone -email you@ex
 ```
 80  → nginx（常驻，只做 ACME webroot 与 301）
 443 → xray（所有节点）
-8443 → certpilot 面板
+9443 → certpilot 面板（HTTPS，证书复用域名那张）
 ```
 
 - 证书全部走 `dns-01`，或 `http-01-webroot` 指向 nginx 站点根目录
@@ -420,7 +443,7 @@ deploy/                  systemd 单元与安装脚本
 
 ## 安全说明
 
-- 面板默认只监听 `:8443`，建议放在内网或用 nginx 加 TLS
+- 面板默认监听 `:9443`，默认是明文 HTTP；公网暴露务必用 `--tls auto` 挂上证书，或放在内网/跳板机后面
 - 首次访问必须设置密码，密码 bcrypt 存储
 - 会话 Cookie 为 HttpOnly + SameSite=Lax；HTTPS 下自动加 Secure
 - 所有写接口校验 `X-Requested-With`，配合 SameSite 抵御 CSRF

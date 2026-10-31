@@ -9,7 +9,10 @@ Type=simple
 # 因此默认以 root 运行。若只用 DNS-01 且不写 /root/cert，
 # 可以改成 User=certpilot 并去掉 AmbientCapabilities。
 User=root
-ExecStart=/usr/local/bin/certpilot serve -data /etc/certpilot -listen :8443
+ExecStart=/usr/local/bin/certpilot serve -data /etc/certpilot -listen :9443
+# 面板启用 HTTPS：追加 -tls-cert / -tls-key（多个用逗号分隔，按 SNI 选择）
+# ExecStart=/usr/local/bin/certpilot serve -data /etc/certpilot -listen :9443 \
+#   -tls-cert /root/cert/a.example.com/fullchain.pem -tls-key /root/cert/a.example.com/privkey.pem
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65535

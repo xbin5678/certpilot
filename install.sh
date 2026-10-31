@@ -58,8 +58,9 @@ CertPilot 安装脚本
   --data DIR         数据目录（默认 /etc/certpilot）
   --password PASS    安装完成后自动设置管理员密码
   --email ADDR       预设 ACME 联系邮箱
-  --tls-cert PATH    面板证书路径（可选，多个用逗号分隔）
-  --tls-key PATH     面板私钥路径（与证书一一对应）
+  --tls-cert PATH    面板证书路径（可选，多个用逗号分隔；填 auto 则自动扫描 /root/cert）
+  --tls-key PATH     面板私钥路径（与证书一一对应；配 --tls-cert auto 时不用填）
+  --tls              等同 --tls-cert auto：自动扫描 /root/cert 下现成的证书对并启用 HTTPS
   --version VER      安装指定版本（默认 latest）
   --repo OWNER/REPO  GitHub 仓库（离线安装时忽略）
   --mode MODE        ondemand（按需启动，默认）或 always（常驻）
@@ -84,6 +85,8 @@ while [ $# -gt 0 ]; do
     --email)    ACME_EMAIL="${2:?}"; shift 2 ;;
     --tls-cert) TLS_CERT="${2:?}"; shift 2 ;;
     --tls-key)  TLS_KEY="${2:?}"; shift 2 ;;
+    --tls)      TLS_CERT="auto"; shift
+                case "${1:-}" in auto|AUTO) shift ;; esac ;;
     --version)  VERSION="${2:?}"; shift 2 ;;
     --repo)     REPO="${2:?}"; shift 2 ;;
     --mode)     MODE="${2:?}"; shift 2 ;;
@@ -100,8 +103,10 @@ done
 [ "$(id -u)" -eq 0 ] || die "请用 root 运行：sudo $0"
 
 SCRIPT_DIR=""
+SCRIPT_FILE=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  SCRIPT_FILE="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 fi
 
 if ! command -v systemctl >/dev/null 2>&1; then
@@ -117,8 +122,8 @@ esac
 # ---------------- 卸载 ----------------
 # 生成"重新执行本脚本"的命令，兼容管道执行（此时 $0 是 bash）
 self_cmd() {
-  if [ -n "$SCRIPT_DIR" ]; then
-    printf 'sudo %s/install.sh' "$SCRIPT_DIR"
+  if [ -n "$SCRIPT_FILE" ]; then
+    printf 'sudo %s' "$SCRIPT_FILE"
   else
     printf 'curl -fsSL https://github.com/%s/releases/latest/download/install.sh | sudo bash -s --' "$REPO"
   fi
@@ -239,12 +244,84 @@ chmod 0750 "$DATA_DIR"
 ok "二进制: $BIN_PATH"
 ok "数据目录: $DATA_DIR"
 
+# ---------------- 面板 TLS 配置 ----------------
+# 三个来源，优先级从高到低：
+#   1) 本次命令行显式给了 --tls-cert / --tls-key
+#   2) 之前装过、unit 里已经带 -tls-cert（升级时沿用，否则升级会把 HTTPS 静默降级成明文）
+#   3) --tls / --tls-cert auto：自动扫描 /root/cert 下现成的证书对
+existing_tls_cert() {
+  [ -f "$UNIT_PATH" ] || return 0
+  sed -n 's/.*-tls-cert \([^ ]*\).*/\1/p' "$UNIT_PATH" | head -1
+}
+existing_tls_key() {
+  [ -f "$UNIT_PATH" ] || return 0
+  sed -n 's/.*-tls-key \([^ ]*\).*/\1/p' "$UNIT_PATH" | head -1
+}
+
+discover_certs() {
+  local dom="" domk="" ip="" ipk="" d base
+  for d in /root/cert/*/; do
+    [ -f "${d}fullchain.pem" ] && [ -f "${d}privkey.pem" ] || continue
+    base="$(basename "$d")"
+    case "$base" in
+      # 目录名带字母 = 域名证书；纯数字点号 = IP 证书，排后面当兜底
+      *[a-zA-Z]*)
+        dom="${dom:+$dom,}${d}fullchain.pem"; domk="${domk:+$domk,}${d}privkey.pem" ;;
+      *)
+        ip="${ip:+$ip,}${d}fullchain.pem"; ipk="${ipk:+$ipk,}${d}privkey.pem" ;;
+    esac
+  done
+  TLS_CERT="${dom}${dom:+${ip:+,}}${ip}"
+  TLS_KEY="${domk}${domk:+${ipk:+,}}${ipk}"
+}
+
+validate_tls() {
+  local IFS=','
+  local -a cs ks
+  read -r -a cs <<< "$TLS_CERT"
+  read -r -a ks <<< "$TLS_KEY"
+  [ "${#cs[@]}" -eq "${#ks[@]}" ] || die "证书与私钥数量不一致：${#cs[@]} vs ${#ks[@]}"
+  local i c k mc mk
+  for i in "${!cs[@]}"; do
+    c="${cs[$i]}"; k="${ks[$i]}"
+    [ -r "$c" ] || die "证书文件不可读：$c"
+    [ -r "$k" ] || die "私钥文件不可读：$k"
+    if command -v openssl >/dev/null 2>&1; then
+      openssl x509 -in "$c" -noout 2>/dev/null || die "证书格式不对（不是 PEM 证书）：$c"
+      mc="$(openssl x509 -in "$c" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null || true)"
+      mk="$(openssl pkey -in "$k" -pubout 2>/dev/null | openssl md5 2>/dev/null || true)"
+      [ -n "$mc" ] && [ -n "$mk" ] || die "读不出公钥，证书或私钥可能损坏：$c / $k"
+      [ "$mc" = "$mk" ] || die "证书与私钥不匹配：$c / $k"
+    fi
+  done
+}
+
+if [ "$TLS_CERT" = "auto" ]; then
+  TLS_CERT=""; TLS_KEY=""
+  discover_certs
+  [ -n "$TLS_CERT" ] || warn "没有在 /root/cert 下找到成对的证书，面板继续用 HTTP"
+elif [ -z "$TLS_CERT" ]; then
+  # 升级场景：沿用上一次的 TLS 配置
+  prev_cert="$(existing_tls_cert)"
+  prev_key="$(existing_tls_key)"
+  if [ -n "$prev_cert" ] && [ -n "$prev_key" ]; then
+    TLS_CERT="$prev_cert"; TLS_KEY="$prev_key"
+    printf '%s\n' "${DIM}沿用已有面板证书：$TLS_CERT${NC}"
+  fi
+fi
+
+if [ -n "$TLS_CERT" ]; then
+  validate_tls
+fi
+
 # ---------------- systemd ----------------
 step "配置 systemd 服务"
 
 EXTRA_ARGS=""
+# 路径里有空格才加引号：systemd 认引号，但升级时从 unit 里回读证书路径只支持无空格写法
+q_arg() { case "$1" in *" "*) printf '"%s"' "$1" ;; *) printf '%s' "$1" ;; esac; }
 if [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ]; then
-  EXTRA_ARGS=" -tls-cert $TLS_CERT -tls-key $TLS_KEY"
+  EXTRA_ARGS=" -tls-cert $(q_arg "$TLS_CERT") -tls-key $(q_arg "$TLS_KEY")"
 fi
 
 # 没指定 --mode 时：已装按需模式就沿用，否则新装默认按需
@@ -257,6 +334,26 @@ if [ -z "$MODE" ]; then
     MODE="ondemand"
   fi
 fi
+
+check_port_available() {
+  local port="$1" line owner i
+  command -v ss >/dev/null 2>&1 || return 0
+  for i in 1 2 3 4 5; do
+    # pipefail 下 grep 无匹配会返回非 0，赋值语句会把 set -e 带崩，这里必须兜住
+    line="$(ss -H -lntp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" | head -1 || true)"
+    [ -n "$line" ] || return 0
+    sleep 1
+  done
+  owner="$(printf '%s' "$line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')"
+  [ -n "$owner" ] || owner="未知进程"
+  die "端口 $port 已被 $owner 占用，面板起不来。换个端口重试：--port 8080"
+}
+
+# 写单元前先停干净：常驻服务或 socket 都可能还占着端口
+systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+systemctl stop certpilot.socket >/dev/null 2>&1 || true
+sleep 1
+check_port_available "$PORT"
 
 case "$MODE" in
   ondemand|always) ;;
@@ -399,14 +496,16 @@ if [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ]; then
 fi
 
 if [ "$NO_START" != "1" ] && command -v curl >/dev/null 2>&1; then
+  HEALTH_OK=0
   for i in $(seq 1 10); do
-    if curl -fsS $CURL_EXTRA "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 \
-       || curl -fsS $CURL_EXTRA "$SCHEME://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+    if curl -fsS $CURL_EXTRA "$SCHEME://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
       ok "健康检查通过"
+      HEALTH_OK=1
       break
     fi
     sleep 1
   done
+  [ "$HEALTH_OK" = "1" ] || warn "健康检查没通过，看日志：journalctl -u $SERVICE -n 30 --no-pager"
 fi
 
 # ---------------- 自动设置密码 ----------------
@@ -417,21 +516,35 @@ if [ -n "$ADMIN_PASSWORD" ] && [ "$NO_START" != "1" ]; then
     -H "Content-Type: application/json" -H "X-Requested-With: certpilot" \
     -d "$BODY" "$SCHEME://127.0.0.1:$PORT/api/setup" 2>/dev/null || true)
   case "$RESP" in
-    *'"ok":true'*) ok "管理员密码已设置" ;;
+    *'"ok":true'*) ok "管理员密码已设置"; PASSWORD_SET=1 ;;
     *) warn "自动设置密码未成功（可能已初始化过），请打开网页手动设置：$RESP" ;;
   esac
 fi
 
 # ---------------- 完成 ----------------
-# 优先公网 IP，取不到再退回本机第一个地址
+# 展示地址优先用证书里的域名（面板本来就是给域名用的），没有域名再退回 IP
+DISPLAY_HOST=""
+if [ -n "$TLS_CERT" ] && command -v openssl >/dev/null 2>&1; then
+  first_cert="${TLS_CERT%%,*}"
+  DISPLAY_HOST="$(openssl x509 -in "$first_cert" -noout -ext subjectAltName 2>/dev/null \
+    | tr ', ' '\n\n' | sed -n 's/^DNS:\([A-Za-z0-9._*-]*\).*/\1/p' | head -1 || true)"
+fi
 IP=$(curl -s4 --max-time 5 https://api.ipify.org 2>/dev/null || true)
 case "$IP" in
   *[!0-9.]*|"") IP=$(hostname -I 2>/dev/null | awk '{print $1}') ;;
 esac
 [ -n "$IP" ] || IP="<服务器IP>"
+[ -n "$DISPLAY_HOST" ] || DISPLAY_HOST="$IP"
 
 step "安装完成"
-printf '%s\n' "  访问地址: ${BOLD}$SCHEME://$IP:$PORT${NC}"
+printf '%s\n' "  访问地址: ${BOLD}$SCHEME://$DISPLAY_HOST:$PORT${NC}"
+if [ -n "$TLS_CERT" ] && [ "$DISPLAY_HOST" != "$IP" ]; then
+  printf '%s\n' "${DIM}  用 IP 访问（$SCHEME://$IP:$PORT）也行，但请优先用域名，避免把 IP 暴露出去。${NC}"
+fi
+if [ -n "$TLS_CERT" ]; then
+  printf '%s\n' "  证书    : $TLS_CERT"
+  printf '%s\n' "${DIM}  面板已启用 HTTPS，明文 http:// 不再可用；证书续期后自动热加载，无需重启。${NC}"
+fi
 printf '%s\n' "  数据目录: $DATA_DIR"
 if [ "$MODE" = "ondemand" ]; then
   printf '%s\n' "  运行模式: 按需启动（空闲 ${IDLE_TIMEOUT} 后退出，待机零内存占用）"
@@ -453,7 +566,9 @@ if [ "$NO_START" != "1" ] && command -v curl >/dev/null 2>&1; then
 fi
 if [ "$NEED_SETUP" = "1" ]; then
   printf '%s\n' "${DIM}  首次访问会让你设置管理员密码。${NC}"
+elif [ "${PASSWORD_SET:-0}" = "1" ]; then
+  printf '%s\n' "${DIM}  管理员密码已按本次参数设置。${NC}"
 else
-  printf '%s\n' "${DIM}  数据目录已存在，用原有管理员密码登录。${NC}"
+  printf '%s\n' "${DIM}  沿用原有管理员密码登录。${NC}"
 fi
 printf '%s\n' "${DIM}  如果打不开，请检查防火墙/安全组是否放行 $PORT 端口。${NC}"
